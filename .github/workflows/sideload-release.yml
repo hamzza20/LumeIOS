@@ -117,7 +117,6 @@ jobs:
             [ -n "$TRAKT_CLIENT_ID" ]     && echo "TRAKT_CLIENT_ID=$TRAKT_CLIENT_ID"
             [ -n "$TRAKT_CLIENT_SECRET" ] && echo "TRAKT_CLIENT_SECRET=$TRAKT_CLIENT_SECRET"
           } > .env || true
-
       # ── Archive (unsigned) ───────────────────────────────────────────────────
       # CODE_SIGNING_ALLOWED=NO skips all signing. The resulting .app is unsigned;
       # users re-sign it themselves (iOS/tvOS via AltStore/Sideloadly,
@@ -134,7 +133,6 @@ jobs:
             CODE_SIGN_IDENTITY="" \
             CODE_SIGNING_REQUIRED=NO \
             ENABLE_HARDENED_RUNTIME=NO
-
       # ── Package: IPA (iOS / tvOS) ────────────────────────────────────────────
       # An IPA is a zip with Payload/<AppName>.app at its root.
       - name: Package IPA
@@ -142,12 +140,10 @@ jobs:
         run: |
           VERSION="$RELEASE_TAG"
           APP=$(find "$RUNNER_TEMP/Lume-Sideload.xcarchive/Products" -name "*.app" | head -1)
-
           mkdir -p "$RUNNER_TEMP/ipa/Payload"
           cp -r "$APP" "$RUNNER_TEMP/ipa/Payload/"
           cd "$RUNNER_TEMP/ipa"
           zip -r "$RUNNER_TEMP/Lume-${VERSION}-${{ matrix.platform }}-Sideload.ipa" Payload
-
       # ── Package: zip (macOS) ────────────────────────────────────────────────
       # ditto preserves symlinks and resource forks inside the .app bundle.
       # plain zip would break the bundle's internal structure.
@@ -156,11 +152,9 @@ jobs:
         run: |
           VERSION="$RELEASE_TAG"
           APP=$(find "$RUNNER_TEMP/Lume-Sideload.xcarchive/Products" -name "*.app" | head -1)
-
           ditto -c -k --sequesterRsrc --keepParent \
             "$APP" \
             "$RUNNER_TEMP/Lume-${VERSION}-macOS-Sideload.zip"
-
       # ── Attach to release ────────────────────────────────────────────────────
       - name: Upload to release
         uses: softprops/action-gh-release@v2
