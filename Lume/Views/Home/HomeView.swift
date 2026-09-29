@@ -3,9 +3,9 @@
 //  Lume
 //
 //  Default landing screen. Shows Recently Watched, Favorites, For You (opt-in
-//  Pro recommendations), Trending Movies/Series and the Trakt watchlist. Which
-//  rows appear and their order are user-configurable (Settings › Layout › Home,
-//  see HomeLayoutSettings); each row only renders when it has content.
+//  Pro recommendations), Trending Movies/Series and the Trakt/Simkl watchlists.
+//  Which rows appear and their order are user-configurable (Settings › Layout ›
+//  Home, see HomeLayoutSettings); each row only renders when it has content.
 //
 
 import SwiftData
@@ -39,6 +39,10 @@ struct HomeView: View {
     @State var trendingMovies: [HomeMediaItem] = []
     @State var trendingSeries: [HomeMediaItem] = []
     @State var watchlist: [HomeMediaItem] = []
+    @State var simklWatchlist: [HomeMediaItem] = []
+    /// Resume fractions for partially-watched series, keyed by series id and
+    /// resolved off the main thread — see `SeriesResumeLoader`.
+    @State private var seriesResume: [String: Double] = [:]
     @AppStorage(RecommendationSettings.enabledKey) private var recommendationsEnabled = RecommendationSettings.enabledDefault
     /// The user's chosen Home row order (Settings › Layout › Home). Falls back to
     /// the declaration order of `HomeSection` until they reorder.
@@ -56,16 +60,28 @@ struct HomeView: View {
     @State var heroItems: [HeroItem] = []
     @State var trendingState: HomeLoadState = .idle
     @State var trakt = TraktService.shared
+    @State var simkl = SimklService.shared
     /// "For You" is a Lume Pro feature; observed so the row appears/disappears
     /// when entitlement changes.
-    @State private var premium = PremiumManager.shared
+    @State var premium = PremiumManager.shared
     // Observed so the For You row defers its (potentially heavy) recompute while
     // the device is busy syncing — and retries automatically once it isn't.
     @State private var indexing = ContentIndexingService.shared
     @State private var epgSync = EPGSyncService.shared
+    /// Observed for the Home empty-state check, which mirrors the Sports rail.
+    @State var sportsFollows = SportsFollowService.shared
+    @State var sportsStore = SportsStore.shared
     @State private var playingMedia: PlayableMedia?
     @State private var showingSync = false
     @State private var showingSettings = false
+    /// Shown when a channel's "Start Multi-View" is picked without Lume Pro.
+    @State private var showingPaywall = false
+    #if os(tvOS)
+        @Environment(DeepLinkRouter.self) private var router
+    #else
+        /// Non-nil while Multi-View is up; carries the channel it opened with.
+        @State private var multiViewLaunch: MultiViewLaunch?
+    #endif
 
     #if os(tvOS)
         /// Hero selected on the immersive home. Drives navigation
@@ -90,8 +106,10 @@ struct HomeView: View {
         series.fetchLimit = 20
         _watchedSeries = Query(series)
 
+        // Channels hidden in Content Management drop out here, the same way Live
+        // TV drops them; a hidden *category* is handled by `excludingRestricted`.
         var streams = FetchDescriptor<LiveStream>(
-            predicate: #Predicate { $0.lastWatchedDate != nil },
+            predicate: #Predicate { $0.lastWatchedDate != nil && $0.isHidden == false },
             sortBy: [SortDescriptor(\.lastWatchedDate, order: .reverse)]
         )
         streams.fetchLimit = 20
@@ -115,7 +133,7 @@ struct HomeView: View {
         _favoriteSeries = Query(favSeries)
 
         var favStreams = FetchDescriptor<LiveStream>(
-            predicate: #Predicate { $0.isFavorite },
+            predicate: #Predicate { $0.isFavorite && $0.isHidden == false },
             sortBy: [SortDescriptor(\.favoriteOrder), SortDescriptor(\.name)]
         )
         favStreams.fetchLimit = 30
@@ -147,6 +165,7 @@ struct HomeView: View {
                             onSelectHero: { selectedHero = $0 },
                             rows: { homeRows }
                         )
+                        .tvQuickSwitchHint(interacted: selectedHero != nil)
                     #else
                         ScrollView {
                             LazyVStack(alignment: .leading, spacing: 28) {
@@ -157,6 +176,7 @@ struct HomeView: View {
                             }
                             .padding(.bottom)
                         }
+                        .browseActivity()
                         .scrollIndicators(.hidden)
                         // Only let content run under the nav bar when the hero
                         // backdrop is there to fill it; otherwise the first row
@@ -165,56 +185,66 @@ struct HomeView: View {
                     #endif
                 }
             }
-            .platformNavigationTitle("Home")
-            #if os(iOS)
-                .navigationBarTitleDisplayMode(.inline)
-                .toolbarBackground(heroItems.isEmpty ? .automatic : .hidden, for: .navigationBar)
-            #endif
-                .profileMenuToolbar()
-                .libraryToolbar(config: LibraryToolbarConfiguration(
-                    playlists: playlists,
-                    selectedPlaylistID: $selectedPlaylistID,
-                    categorySortRaw: $categorySortRaw,
-                    contentSortRaw: $contentSortRaw,
-                    showingSync: $showingSync,
-                    showingSettings: $showingSettings,
-                    activePlaylist: activePlaylist
-                ))
-                .navigationDestination(for: Movie.self) { movie in
-                    MovieDetailView(movie: movie, animationNamespace: animationNamespace)
-                    #if os(iOS)
-                        .navigationTransition(.zoom(sourceID: movie.id, in: animationNamespace))
-                    #endif
-                }
-                .navigationDestination(for: Series.self) { series in
-                    SeriesDetailView(series: series, animationNamespace: animationNamespace)
-                    #if os(iOS)
-                        .navigationTransition(.zoom(sourceID: series.id, in: animationNamespace))
-                    #endif
-                }
+            .profileMenuToolbar()
+            .libraryToolbar(config: LibraryToolbarConfiguration(
+                playlists: playlists,
+                selectedPlaylistID: $selectedPlaylistID,
+                categorySortRaw: $categorySortRaw,
+                contentSortRaw: $contentSortRaw,
+                showingSync: $showingSync,
+                showingSettings: $showingSettings,
+                activePlaylist: activePlaylist
+            ))
+            .navigationDestination(for: Movie.self) { movie in
+                MovieDetailView(movie: movie, animationNamespace: animationNamespace)
+                #if os(iOS)
+                    .navigationTransition(.zoom(sourceID: movie.id, in: animationNamespace))
+                #endif
+            }
+            .navigationDestination(for: Series.self) { series in
+                SeriesDetailView(series: series, animationNamespace: animationNamespace)
+                #if os(iOS)
+                    .navigationTransition(.zoom(sourceID: series.id, in: animationNamespace))
+                #endif
+            }
             #if os(tvOS)
-                .navigationDestination(item: $selectedHero) { hero in
-                    if let movie = hero.movie {
-                        MovieDetailView(movie: movie, animationNamespace: animationNamespace)
-                    } else if let series = hero.series {
-                        SeriesDetailView(series: series, animationNamespace: animationNamespace)
-                    }
+            .navigationDestination(item: $selectedHero) { hero in
+                if let movie = hero.movie {
+                    MovieDetailView(movie: movie, animationNamespace: animationNamespace)
+                } else if let series = hero.series {
+                    SeriesDetailView(series: series, animationNamespace: animationNamespace)
                 }
+            }
             #endif
-                .task(id: "\(playlists.count)-\(selectedPlaylistID)-\(activePlaylist?.lastSyncDate?.timeIntervalSince1970 ?? 0)") {
-                    await loadTrending(cacheKey: "\(playlists.count)-\(selectedPlaylistID)-\(activePlaylist?.lastSyncDate?.timeIntervalSince1970 ?? 0)")
-                }
-                .task(id: "watchlist-\(trakt.isConnected)-\(selectedPlaylistID)") {
-                    await loadWatchlist(cacheKey: "watchlist-\(trakt.isConnected)-\(selectedPlaylistID)")
-                }
-                .task(id: recommendationsKey) {
-                    await loadRecommendations()
-                }
+            .task(id: trendingKey) {
+                await loadTrending(cacheKey: trendingKey)
+            }
+            .task(id: watchlistKey) {
+                await loadWatchlist(cacheKey: watchlistKey)
+            }
+            .task(id: simklWatchlistKey) {
+                await loadSimklWatchlist(cacheKey: simklWatchlistKey)
+            }
+            .task(id: recommendationsKey) {
+                await loadRecommendations()
+            }
+            .task(id: seriesResumeKey) {
+                await loadSeriesResume()
+            }
+            .task(id: sportsWarmKey) {
+                warmSports()
+            }
             #if os(iOS) || os(tvOS)
-                .fullScreenCover(item: $playingMedia) { media in
-                    FullScreenPlayerView(media: media)
-                }
+            .fullScreenCover(item: $playingMedia) { media in
+                FullScreenPlayerView(media: media)
+            }
             #endif
+            #if os(iOS)
+            .fullScreenCover(item: $multiViewLaunch) { launch in
+                MultiViewScreen(seed: launch.seed)
+            }
+            #endif
+            .paywall(isPresented: $showingPaywall, highlight: .multiView)
         }
     }
 
@@ -238,6 +268,7 @@ struct HomeView: View {
             case .forYou:
                 ForYouRow(
                     items: recommendations,
+                    seriesResume: seriesResume,
                     isLoading: !recommendationsLoaded,
                     onPlayLive: playChannel,
                     onVote: vote,
@@ -249,6 +280,10 @@ struct HomeView: View {
                 rail("Trending Series", trendingSeries)
             case .traktWatchlist:
                 rail("From Your Trakt Watchlist", watchlist)
+            case .simklWatchlist:
+                rail("From Your Simkl Watchlist", simklWatchlist)
+            case .sports:
+                SportsHomeRail(isSyncBusy: isSyncBusy)
             }
         }
     }
@@ -256,7 +291,7 @@ struct HomeView: View {
     /// Whether `section` should render. "For You" follows the recommendations
     /// opt-in (which also gates its recompute); the rest follow the user's
     /// per-section switches.
-    private func isSectionEnabled(_ section: HomeSection) -> Bool {
+    func isSectionEnabled(_ section: HomeSection) -> Bool {
         section == .forYou
             ? (recommendationsEnabled && premium.isPremium)
             : HomeLayoutSettings.isEnabled(section, disabledRaw: disabledSectionsRaw)
@@ -271,8 +306,42 @@ struct HomeView: View {
         onRemove: ((HomeMediaItem) -> Void)? = nil
     ) -> some View {
         if !items.isEmpty {
-            HomeRow(title: title, items: items, onPlayLive: playChannel, onRemove: onRemove, animationNamespace: animationNamespace)
+            HomeRow(
+                title: title,
+                items: items,
+                seriesResume: seriesResume,
+                onPlayLive: playChannel,
+                onRemove: onRemove,
+                onStartMultiView: startMultiView,
+                animationNamespace: animationNamespace
+            )
         }
+    }
+
+    /// Identity of the trending/hero load, and the key its session memo is
+    /// stored under. Includes the visibility token so hiding a category in
+    /// Content Management reloads the rows instead of replaying a cached list
+    /// that was matched against the whole catalog.
+    var trendingKey: String {
+        let synced = activePlaylist?.lastSyncDate?.timeIntervalSince1970 ?? 0
+        return "\(playlists.count)-\(selectedPlaylistID)-\(synced)-\(restriction.visibilityToken)"
+    }
+
+    var watchlistKey: String {
+        "watchlist-\(trakt.isConnected)-\(selectedPlaylistID)-\(restriction.visibilityToken)"
+    }
+
+    var simklWatchlistKey: String {
+        "simkl-watchlist-\(simkl.isConnected)-\(selectedPlaylistID)-\(restriction.visibilityToken)"
+    }
+
+    /// Identity of the series resume lookup. Resuming or finishing an episode
+    /// stamps its series' `lastWatchedDate` (`WatchProgressWriter`), which is
+    /// exactly what the Recently Watched query orders by — so the newest stamp
+    /// moves whenever a resume bar would.
+    private var seriesResumeKey: String {
+        let newest = watchedSeries.first?.lastWatchedDate?.timeIntervalSince1970 ?? 0
+        return "resume-\(watchedSeries.count)-\(newest)-\(selectedPlaylistID)"
     }
 
     // MARK: - Playlist scoping
@@ -335,6 +404,8 @@ struct HomeView: View {
             && trendingMovies.isEmpty
             && trendingSeries.isEmpty
             && watchlist.isEmpty
+            && simklWatchlist.isEmpty
+            && !sportsRailHasContent
             && trendingState.isSettled
     }
 
@@ -351,14 +422,50 @@ struct HomeView: View {
         try? modelContext.save()
     }
 
+    // MARK: - Series resume
+
+    /// Resolves the resume bar for every partially-watched series in one indexed
+    /// fetch, off the main thread. The rails then read a plain dictionary rather
+    /// than each card faulting its series' whole `episodes` relationship from
+    /// `body` — the same hoist the Live TV list does for now/next EPG.
+    private func loadSeriesResume() async {
+        let container = modelContext.container
+        seriesResume = await Task.detached(priority: .userInitiated) {
+            SeriesResumeLoader.load(container: container)
+        }.value
+    }
+
     // MARK: - Playback
+
+    /// Opens Multi-View seeded with a channel from one of the rails, or the
+    /// paywall when the viewer isn't on Lume Pro. Mirrors `LiveTVView`'s pair of
+    /// the same name — the rails are a second entry point to the same feature.
+    private func startMultiView(with stream: LiveStream) {
+        guard let playlist = activePlaylist,
+              let media = PlayableMedia.from(stream: stream, playlist: playlist) else { return }
+        guard premium.isPremium else {
+            showingPaywall = true
+            return
+        }
+        #if os(macOS)
+            // The window is a singleton, so it cannot be built around a launch:
+            // hand the channel over and let the grid adopt it on appear.
+            MultiViewLaunchQueue.shared.pending = [media]
+            openWindow(id: "multiview")
+        #elseif os(tvOS)
+            // Presented by `MainTabView`, above the tab bar — see the router.
+            router.multiViewLaunch = MultiViewLaunch(seed: [media])
+        #else
+            multiViewLaunch = MultiViewLaunch(seed: [media])
+        #endif
+    }
 
     private func playChannel(_ stream: LiveStream) {
         guard let playlist = activePlaylist,
               let media = PlayableMedia.from(stream: stream, playlist: playlist) else { return }
         if ExternalPlayback.open(media) { return }
         #if os(macOS)
-            openWindow(id: "player", value: media)
+            MacPlayerWindowRouter.shared.play(media, using: openWindow)
         #else
             playingMedia = media
         #endif
@@ -368,13 +475,14 @@ struct HomeView: View {
 // MARK: - For You
 
 private extension HomeView {
-    /// Refresh the row when the active playlist or the favorites/history queries
-    /// change. This only re-resolves the list (cheap, and re-validates each entry
-    /// against live state) — the engine still throttles the actual re-ranking to
+    /// Refresh the row when the active playlist, the favorites/history queries or
+    /// the hidden categories change. This only re-resolves the list (cheap, and
+    /// re-validates each entry against live state) — the engine still throttles the actual re-ranking to
     /// its recalculation interval.
     var recommendationsKey: String {
         let counts = "\(watchedMovies.count)-\(watchedSeries.count)-\(favoriteMovies.count)-\(favoriteSeries.count)"
-        return "rec-\(recommendationsEnabled)-\(premium.isPremium)-\(isSyncBusy)-\(recommendationsRecalcToken)-\(counts)-\(selectedPlaylistID)"
+        let visibility = restriction.visibilityToken
+        return "rec-\(recommendationsEnabled)-\(premium.isPremium)-\(isSyncBusy)-\(recommendationsRecalcToken)-\(counts)-\(selectedPlaylistID)-\(visibility)"
     }
 
     /// True while a playlist sync, iCloud sync or EPG import is running. The For
@@ -405,7 +513,7 @@ private extension HomeView {
         defer { Perf.end(interval) }
 
         let engine = RecommendationEngine(modelContainer: modelContext.container)
-        let scored = await engine.recommendations()
+        let scored = await engine.recommendations(excluding: restriction.excludedCategoryIDs)
         var items: [HomeMediaItem] = []
         for recommendation in scored {
             switch recommendation.kind {

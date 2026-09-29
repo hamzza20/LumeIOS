@@ -16,8 +16,17 @@
     struct TVChannelsList: View {
         let scope: LiveChannelScope
         let playlistPrefix: String
+        /// The active playlist's source, so an empty list can say *why* it is
+        /// empty rather than tell a WebDAV user to sync again.
+        let sourceType: PlaylistSourceType?
+        /// Seeds Multi-View with this channel, gated on Lume Pro by the host.
+        let onStartMultiView: (LiveStream) -> Void
         let onPlay: (LiveStream) -> Void
         @Environment(\.modelContext) private var modelContext
+        /// Drops channels in categories locked away from a child profile — the
+        /// iOS list has always done this; this one didn't, so Favorites and
+        /// Recently Watched still surfaced them here.
+        @Environment(\.contentRestriction) private var restriction
         @Query private var streams: [LiveStream]
         /// Now/next EPG for the visible channels, resolved in one off-main fetch
         /// (see `ChannelEPGSnapshot`) instead of a per-row `@Query`.
@@ -30,15 +39,24 @@
         /// Drives the "Clear Recently Watched" confirmation alert.
         @State private var confirmingClear = false
 
-        init(scope: LiveChannelScope, playlistPrefix: String, sort: ContentSortOption, onPlay: @escaping (LiveStream) -> Void) {
+        init(
+            scope: LiveChannelScope,
+            playlistPrefix: String,
+            sort: ContentSortOption,
+            sourceType: PlaylistSourceType?,
+            onStartMultiView: @escaping (LiveStream) -> Void,
+            onPlay: @escaping (LiveStream) -> Void
+        ) {
             self.scope = scope
             self.playlistPrefix = playlistPrefix
+            self.sourceType = sourceType
+            self.onStartMultiView = onStartMultiView
             self.onPlay = onPlay
             _streams = Query(LiveChannelQuery.descriptor(for: scope, sort: sort))
         }
 
         private var scopedStreams: [LiveStream] {
-            LiveChannelQuery.scoped(streams, scope: scope, playlistPrefix: playlistPrefix)
+            LiveChannelQuery.scoped(streams, scope: scope, playlistPrefix: playlistPrefix, restriction: restriction)
         }
 
         var body: some View {
@@ -47,12 +65,17 @@
             ScrollView {
                 LazyVStack(spacing: 14) {
                     if channels.isEmpty {
-                        ContentUnavailableView(
-                            "No Channels",
-                            systemImage: "antenna.radiowaves.left.and.right",
-                            description: Text("This category has no channels")
-                        )
-                        .padding(.top, 80)
+                        if sourceType.map({ !$0.canCarryLiveChannels }) == true {
+                            LiveTVEmptyState(sourceType: sourceType)
+                                .padding(.top, 80)
+                        } else {
+                            ContentUnavailableView(
+                                "No Channels",
+                                systemImage: "antenna.radiowaves.left.and.right",
+                                description: Text("This category has no channels")
+                            )
+                            .padding(.top, 80)
+                        }
                     } else {
                         if scope == .recentlyWatched {
                             clearButton
@@ -61,10 +84,10 @@
                             TVChannelRow(
                                 stream: stream,
                                 epg: epgByChannel[stream.epgChannelId ?? ""],
-                                onRemove: scope == .recentlyWatched ? { removeFromRecentlyWatched(stream) } : nil
-                            ) {
-                                onPlay(stream)
-                            }
+                                onRemove: scope == .recentlyWatched ? { removeFromRecentlyWatched(stream) } : nil,
+                                onStartMultiView: { onStartMultiView(stream) },
+                                onPlay: { onPlay(stream) }
+                            )
                             .onAppear {
                                 if stream.id == visible.last?.id, visibleCount < channels.count {
                                     visibleCount = min(visibleCount + LiveChannelQuery.pageSize, channels.count)
@@ -140,8 +163,10 @@
         /// (see `ChannelEPGSnapshot`) rather than by a per-row `@Query`.
         var epg: ChannelEPG?
         var onRemove: (() -> Void)?
+        var onStartMultiView: (() -> Void)?
         let onPlay: () -> Void
 
+        @Environment(\.modelContext) private var modelContext
         @FocusState private var isFocused: Bool
 
         private var currentEPG: EPGSlot? {
@@ -220,7 +245,12 @@
             .buttonStyle(TVCardButtonStyle(focusScale: 1.03))
             .focused($isFocused)
             .animation(.easeOut(duration: 0.18), value: isFocused)
-            .recentlyWatchedRemoveMenu(onRemove)
+            .liveChannelMenu(
+                isFavorite: stream.isFavorite,
+                onToggleFavorite: { LiveChannelFavorites.toggle(stream, in: modelContext) },
+                onStartMultiView: onStartMultiView,
+                onRemoveFromRecents: onRemove
+            )
         }
 
         private var logo: some View {
@@ -272,10 +302,18 @@
         let contentSort: ContentSortOption
         let onPlay: (LiveStream) -> Void
         let onPlayCatchup: (LiveStream, EPGProgramCell) -> Void
+        /// Raises Multi-View (or the paywall) — the rail hosts the entry point.
+        let onOpenMultiView: () -> Void
+        /// Raises Multi-View seeded with a channel, from its long-press menu.
+        let onStartMultiView: (LiveStream) -> Void
 
         /// The active playlist's id prefix, needed to scope the virtual
         /// (favorites / recently watched) collections in-memory.
         let playlistPrefix: String
+
+        /// The active playlist's source, forwarded so an empty channel list can
+        /// explain itself. See `LiveTVEmptyState`.
+        let sourceType: PlaylistSourceType?
 
         private var layoutMode: LiveTVLayoutMode {
             LiveTVLayoutMode(rawValue: layoutModeRaw) ?? .list
@@ -296,6 +334,7 @@
                     sections: sections,
                     selectedSection: $selectedSection,
                     layoutModeRaw: $layoutModeRaw,
+                    onOpenMultiView: onOpenMultiView,
                     onCategoryActivated: { guideFocusToken += 1 }
                 )
                 content
@@ -313,15 +352,23 @@
                         sort: contentSort,
                         onPlay: onPlay,
                         onPlayCatchup: onPlayCatchup,
+                        onStartMultiView: onStartMultiView,
                         focusToken: guideFocusToken,
                         onDidClaimFocus: { guideFocusToken = 0 }
                     )
                     .id("\(section.id)-\(contentSort.rawValue)-guide")
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                 case .list:
-                    TVChannelsList(scope: section.scope, playlistPrefix: playlistPrefix, sort: contentSort, onPlay: onPlay)
-                        .id("\(section.id)-\(contentSort.rawValue)-list")
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    TVChannelsList(
+                        scope: section.scope,
+                        playlistPrefix: playlistPrefix,
+                        sort: contentSort,
+                        sourceType: sourceType,
+                        onStartMultiView: onStartMultiView,
+                        onPlay: onPlay
+                    )
+                    .id("\(section.id)-\(contentSort.rawValue)-list")
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
             } else {
                 ContentUnavailableView(
@@ -343,12 +390,14 @@
         let sections: [LiveTVSection]
         @Binding var selectedSection: LiveTVSection?
         @Binding var layoutModeRaw: String
+        let onOpenMultiView: () -> Void
         /// Fired when the user activates (clicks) a category.
         var onCategoryActivated: () -> Void = {}
 
         /// Which rail control currently holds focus — drives the highlight.
         private enum RailItem: Hashable {
             case mode(String)
+            case multiView
             case category(String)
         }
 
@@ -375,11 +424,14 @@
                 // Without this, pressing Down from the right-hand "Guide" segment
                 // misses the left-aligned categories (only the left "List"
                 // segment sits directly above them).
-                viewModeSwitch
-                    .padding(.horizontal, 14)
-                    .padding(.top, 40)
-                    .padding(.bottom, 18)
-                    .focusSection()
+                HStack(spacing: 8) {
+                    viewModeSwitch
+                    multiViewButton
+                }
+                .padding(.horizontal, 14)
+                .padding(.top, 40)
+                .padding(.bottom, 18)
+                .focusSection()
 
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 8) {
@@ -454,6 +506,29 @@
             }
             .buttonStyle(TVCardButtonStyle(focusScale: 1.04))
             .focused($focused, equals: .mode(mode.rawValue))
+            .animation(.easeOut(duration: 0.18), value: isItemFocused)
+        }
+
+        /// Sits outside the List/Guide pill group: it is an action, not a third
+        /// segment of a mutually exclusive choice. Sharing the row's focus section
+        /// keeps it a left/right move away, and leaves Down landing on the
+        /// categories from any of the three controls.
+        private var multiViewButton: some View {
+            let isItemFocused = focused == .multiView
+            return Button(action: onOpenMultiView) {
+                Image(systemName: "rectangle.split.2x2")
+                    .font(.system(size: 22, weight: .semibold))
+                    .frame(width: 52)
+                    .padding(.vertical, 20)
+                    .foregroundStyle(isItemFocused ? .black : .white.opacity(0.6))
+                    .background(
+                        RoundedRectangle(cornerRadius: 14, style: .continuous)
+                            .fill(isItemFocused ? AnyShapeStyle(.white) : AnyShapeStyle(.white.opacity(0.08)))
+                    )
+            }
+            .buttonStyle(TVCardButtonStyle(focusScale: 1.04))
+            .focused($focused, equals: .multiView)
+            .accessibilityLabel("Multi-View")
             .animation(.easeOut(duration: 0.18), value: isItemFocused)
         }
 

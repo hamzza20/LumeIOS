@@ -68,6 +68,14 @@ else
     echo "warning: INTRO_DB_API_KEY not set in .env — IntroDB reads still work unauthenticated"
 fi
 
+OPENSUBTITLES_API_KEY="$(read_env OPENSUBTITLES_API_KEY)"
+if [ -n "$OPENSUBTITLES_API_KEY" ]; then
+    set_plist OpenSubtitlesAPIKey "$OPENSUBTITLES_API_KEY"
+    echo "Injected OPENSUBTITLES_API_KEY into Info.plist"
+else
+    echo "warning: OPENSUBTITLES_API_KEY not set in .env — subtitle search will be hidden"
+fi
+
 TRAKT_CLIENT_ID="$(read_env TRAKT_CLIENT_ID)"
 TRAKT_CLIENT_SECRET="$(read_env TRAKT_CLIENT_SECRET)"
 if [ -n "$TRAKT_CLIENT_ID" ] && [ -n "$TRAKT_CLIENT_SECRET" ]; then
@@ -76,4 +84,18 @@ if [ -n "$TRAKT_CLIENT_ID" ] && [ -n "$TRAKT_CLIENT_SECRET" ]; then
     echo "Injected Trakt credentials into Info.plist"
 else
     echo "warning: TRAKT_CLIENT_ID/SECRET not set in .env — Trakt integration will be hidden"
+fi
+
+SIMKL_CLIENT_ID="$(read_env SIMKL_CLIENT_ID)"
+if [ -n "$SIMKL_CLIENT_ID" ]; then
+    set_plist SimklClientID "$SIMKL_CLIENT_ID"
+    # Simkl's TV/device OAuth registrations carry no secret; one present for a
+    # server-app registration is forwarded when set.
+    SIMKL_CLIENT_SECRET="$(read_env SIMKL_CLIENT_SECRET)"
+    if [ -n "$SIMKL_CLIENT_SECRET" ]; then
+        set_plist SimklClientSecret "$SIMKL_CLIENT_SECRET"
+    fi
+    echo "Injected Simkl credentials into Info.plist"
+else
+    echo "warning: SIMKL_CLIENT_ID not set in .env — Simkl integration will be hidden"
 fi

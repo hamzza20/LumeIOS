@@ -30,6 +30,27 @@ struct SearchView: View {
     /// list stays responsive even when a playlist holds tens of thousands of items.
     private let resultLimit = 50
 
+    // How long typing has to pause before a query runs. Longer on tvOS: a
+    // remote enters a letter every second or so, which a short debounce turns
+    // into a full search and list rebuild per letter while the keyboard is
+    // still being driven.
+    #if os(tvOS)
+        private static let debounce: Duration = .milliseconds(700)
+    #else
+        private static let debounce: Duration = .milliseconds(300)
+    #endif
+
+    /// Whether the content filter is on screen. tvOS keeps it up while the
+    /// query is empty too, so the first letter doesn't restructure the list
+    /// under the keyboard.
+    private var showsFilter: Bool {
+        #if os(tvOS)
+            true
+        #else
+            !trimmedQuery.isEmpty
+        #endif
+    }
+
     private var trimmedQuery: String {
         searchText.trimmingCharacters(in: .whitespacesAndNewlines)
     }
@@ -37,14 +58,7 @@ struct SearchView: View {
     var body: some View {
         NavigationStack {
             List {
-                if trimmedQuery.isEmpty {
-                    ContentUnavailableView(
-                        "Search",
-                        systemImage: "magnifyingglass",
-                        description: Text("Search for movies, series, or live TV channels")
-                    )
-                } else {
-                    // Filter Picker
+                if showsFilter {
                     Picker("Filter", selection: $selectedFilter) {
                         ForEach(ContentFilter.allCases) { filter in
                             Text(filter.label).tag(filter)
@@ -53,7 +67,15 @@ struct SearchView: View {
                     .pickerStyle(.segmented)
                     .listRowInsets(EdgeInsets())
                     .listRowBackground(Color.clear)
+                }
 
+                if trimmedQuery.isEmpty {
+                    ContentUnavailableView(
+                        "Search",
+                        systemImage: "magnifyingglass",
+                        description: Text("Search for movies, series, or live TV channels")
+                    )
+                } else {
                     // Results — only show "No Results" once a query has actually
                     // been run, so it doesn't flash while the input is debouncing.
                     if results.isEmpty {
@@ -66,21 +88,33 @@ struct SearchView: View {
                                 switch result {
                                 case let .movie(movie):
                                     NavigationLink(value: movie) {
-                                        SearchResultRow(result: result)
+                                        SearchResultRow(result: result, playlistName: playlistName(for: result))
                                             .matchedTransitionSourceIfAvailable(id: movie.id, in: animationNamespace)
                                     }
+                                    .mediaFavoriteMenu(
+                                        isFavorite: { movie.isFavorite },
+                                        onToggleFavorite: { MediaFavorites.toggle(movie, in: modelContext) }
+                                    )
                                 case let .series(series):
                                     NavigationLink(value: series) {
-                                        SearchResultRow(result: result)
+                                        SearchResultRow(result: result, playlistName: playlistName(for: result))
                                             .matchedTransitionSourceIfAvailable(id: series.id, in: animationNamespace)
                                     }
+                                    .mediaFavoriteMenu(
+                                        isFavorite: { series.isFavorite },
+                                        onToggleFavorite: { MediaFavorites.toggle(series, in: modelContext) }
+                                    )
                                 case let .liveStream(stream):
                                     Button {
                                         playChannel(stream)
                                     } label: {
-                                        SearchResultRow(result: result)
+                                        SearchResultRow(result: result, playlistName: playlistName(for: result))
                                     }
                                     .buttonStyle(.plain)
+                                    .liveChannelMenu(
+                                        isFavorite: stream.isFavorite,
+                                        onToggleFavorite: { LiveChannelFavorites.toggle(stream, in: modelContext) }
+                                    )
                                 }
                             }
                         } header: {
@@ -89,41 +123,37 @@ struct SearchView: View {
                     }
                 }
             }
-            .platformNavigationTitle("Search")
-            .searchable(text: $searchText, prompt: "Movies, Series, Live TV...")
-            #if os(iOS)
-                .searchToolbarMinimizeIfAvailable()
-            #endif
-                .navigationDestination(for: Movie.self) { movie in
-                    MovieDetailView(movie: movie, animationNamespace: animationNamespace)
-                    #if os(iOS)
-                        .navigationTransition(.zoom(sourceID: movie.id, in: animationNamespace))
-                    #endif
+            .searchField(text: $searchText)
+            .navigationDestination(for: Movie.self) { movie in
+                MovieDetailView(movie: movie, animationNamespace: animationNamespace)
+                #if os(iOS)
+                    .navigationTransition(.zoom(sourceID: movie.id, in: animationNamespace))
+                #endif
+            }
+            .navigationDestination(for: Series.self) { series in
+                SeriesDetailView(series: series, animationNamespace: animationNamespace)
+                #if os(iOS)
+                    .navigationTransition(.zoom(sourceID: series.id, in: animationNamespace))
+                #endif
+            }
+            .task(id: searchText) {
+                // Debounce raw keystrokes. .task(id:) cancels the in-flight task
+                // (including this sleep) the instant searchText changes, so the
+                // fetch below only fires once typing actually pauses.
+                let trimmed = trimmedQuery
+                guard !trimmed.isEmpty else {
+                    debouncedSearchText = ""
+                    return
                 }
-                .navigationDestination(for: Series.self) { series in
-                    SeriesDetailView(series: series, animationNamespace: animationNamespace)
-                    #if os(iOS)
-                        .navigationTransition(.zoom(sourceID: series.id, in: animationNamespace))
-                    #endif
-                }
-                .task(id: searchText) {
-                    // Debounce raw keystrokes. .task(id:) cancels the in-flight task
-                    // (including this sleep) the instant searchText changes, so the
-                    // fetch below only fires once typing actually pauses.
-                    let trimmed = trimmedQuery
-                    guard !trimmed.isEmpty else {
-                        debouncedSearchText = ""
-                        return
-                    }
-                    try? await Task.sleep(for: .milliseconds(300))
-                    guard !Task.isCancelled else { return }
-                    debouncedSearchText = trimmed
-                }
-                .task(id: SearchKey(text: debouncedSearchText, filter: selectedFilter, allPlaylists: searchAllPlaylists)) {
-                    // Re-run whenever the settled query or the filter changes.
-                    // Filter changes are instant (no debounce on the segmented control).
-                    await updateResults()
-                }
+                try? await Task.sleep(for: Self.debounce)
+                guard !Task.isCancelled else { return }
+                debouncedSearchText = trimmed
+            }
+            .task(id: SearchKey(text: debouncedSearchText, filter: selectedFilter, allPlaylists: searchAllPlaylists)) {
+                // Re-run whenever the settled query or the filter changes.
+                // Filter changes are instant (no debounce on the segmented control).
+                await updateResults()
+            }
         }
         #if os(iOS) || os(tvOS)
         .fullScreenCover(item: $playingMedia) { media in
@@ -138,12 +168,27 @@ struct SearchView: View {
         playlists.active(for: selectedPlaylistID)
     }
 
+    /// The owning playlist's name, for rows that could have come from any of
+    /// them. Only while searching across several playlists: with one playlist
+    /// in play it's the same badge on every row, and the point of it is telling
+    /// two identically-named rows from different providers apart.
+    private func playlistName(for result: SearchResult) -> String? {
+        guard searchAllPlaylists, playlists.count > 1 else { return nil }
+        return playlists.owner(ofContentID: result.contentID)?.name
+    }
+
     private func playChannel(_ stream: LiveStream) {
-        guard let playlist = activePlaylist,
+        // Cross-playlist search surfaces channels the active playlist can't
+        // stream: a live URL is built from its playlist's server, credentials
+        // and portal, so playing a foreign channel with the active playlist
+        // asks the wrong provider for it. Stream ids are per-provider integers,
+        // so that doesn't reliably fail — it can quietly play whichever channel
+        // holds the same id over there.
+        guard let playlist = playlists.owner(ofContentID: stream.id) ?? activePlaylist,
               let media = PlayableMedia.from(stream: stream, playlist: playlist) else { return }
         if ExternalPlayback.open(media) { return }
         #if os(macOS)
-            openWindow(id: "player", value: media)
+            MacPlayerWindowRouter.shared.play(media, using: openWindow)
         #else
             playingMedia = media
         #endif
@@ -172,12 +217,13 @@ struct SearchView: View {
         let wantLive = filter == .all || filter == .liveTV
 
         // A Stalker portal's movies/series aren't synced locally, so they can
-        // only be found through the portal's own search API. Live TV (which
+        // only be found through the portal's own search API — asked of every
+        // Stalker playlist in scope, not just the active one. Live TV (which
         // *is* synced) and every other source type use the local predicate
         // search. Cross-playlist search still runs the local pass too, so other
         // playlists' synced content is included.
         let usePortalForVODSeries = playlist?.sourceType == .stalker && !searchAllPlaylists
-        let portal = await portalSearch(query: query, playlist: playlist, wantMovies: wantMovies, wantSeries: wantSeries)
+        let portal = await portalSearch(query: query, wantMovies: wantMovies, wantSeries: wantSeries)
         guard !Task.isCancelled else { return }
 
         let localHits = await localSearch(
@@ -191,40 +237,84 @@ struct SearchView: View {
         results = assembleResults(portal: portal, localHits: localHits)
     }
 
-    /// Portal search hits (element ids) for a Stalker active playlist; empty
-    /// otherwise.
+    /// Portal search hits (element ids) from every Stalker playlist in scope.
+    /// A Stalker catalog's movies and series are never synced into the store,
+    /// so the portal's own search API is the only way to reach them — which
+    /// left a non-active Stalker playlist invisible to search whatever
+    /// "Search All Playlists" was set to, since the local pass has nothing of
+    /// its VOD to find.
     private func portalSearch(
-        query: String, playlist: Playlist?, wantMovies: Bool, wantSeries: Bool
+        query: String, wantMovies: Bool, wantSeries: Bool
     ) async -> (movies: [String], series: [String]) {
-        guard let playlist, playlist.sourceType == .stalker, wantMovies || wantSeries else { return ([], []) }
+        let targets = portalPlaylists
+        guard !targets.isEmpty, wantMovies || wantSeries else { return ([], []) }
         let manager = ContentSyncManager(modelContainer: modelContext.container)
-        return await manager.searchStalker(
-            query: query, playlist: playlist,
-            includeMovies: wantMovies, includeSeries: wantSeries, limit: resultLimit
-        )
+        var movies: [[String]] = []
+        var series: [[String]] = []
+        // One portal at a time: these are separate providers, each with its own
+        // connection allowance, and a Stalker middleware is quick to refuse a
+        // second session. The debounce means only a settled query gets here,
+        // and cancellation stops the walk before the next portal is asked.
+        for playlist in targets {
+            guard !Task.isCancelled else { break }
+            let hits = await manager.searchStalker(
+                query: query, playlist: playlist,
+                includeMovies: wantMovies, includeSeries: wantSeries, limit: resultLimit
+            )
+            movies.append(hits.movies)
+            series.append(hits.series)
+        }
+        // Each portal ranks its own hits, so rotate rather than concatenate.
+        return (interleaved(movies, limit: resultLimit), interleaved(series, limit: resultLimit))
+    }
+
+    /// The Stalker playlists this search asks directly: all of them while
+    /// searching across playlists, otherwise the active one if it happens to
+    /// be a portal.
+    private var portalPlaylists: [Playlist] {
+        let candidates = searchAllPlaylists ? playlists : [activePlaylist].compactMap(\.self)
+        return candidates.filter { $0.sourceType == .stalker }
     }
 
     /// Bounded local predicate search, run off the main thread.
     private func localSearch(
         query: String, playlist: Playlist?, wantMovies: Bool, wantSeries: Bool, wantLive: Bool
     ) async -> SearchHits {
-        // Scope to the active playlist unless cross-playlist search is on. Every
-        // category id is prefixed with its playlist's UUID (see Category.id),
-        // which appears nowhere else, so matching it within categoryId limits
-        // results to that playlist.
+        // Scope to the active playlist unless cross-playlist search is on, in
+        // which case every playlist is named and each gets its own share of the
+        // budget — one catalog would otherwise fill all `resultLimit` rows and
+        // the others would look unsearched. Every catalog row's id carries its
+        // playlist's UUID as a prefix (see `SearchScope.playlistIDPrefix`), so a
+        // prefix test on the indexed `id` limits results to that playlist.
+        // Hidden/restricted categories are excluded in the fetch rather than
+        // afterwards, so `resultLimit` isn't spent on rows the viewer will
+        // never see.
+        let scoped = searchAllPlaylists ? playlists : [playlist].compactMap(\.self)
         let request = SearchRequest(
             query: query,
-            playlistID: playlist?.id.uuidString ?? "",
-            restrictToPlaylist: !searchAllPlaylists && playlist != nil,
+            playlistIDs: scoped.map(\.id.uuidString),
             wantMovies: wantMovies,
             wantSeries: wantSeries,
             wantLive: wantLive,
+            excludedCategoryIDs: restriction.excludedCategoryIDs,
             limit: resultLimit
         )
         let container = modelContext.container
-        return await Task.detached(priority: .userInitiated) {
+        // `Task.detached` starts an unstructured task, which does not inherit
+        // this one's cancellation: every keystroke that settled into a query
+        // used to leave its scans running to the end, so on a large catalog the
+        // superseded work piled up behind the query the viewer is waiting for.
+        // Forwarding the cancellation lets `SearchFetcher` bail between its
+        // scans; the partial hits it returns are dropped by
+        // `updateResults`, which is the task being cancelled.
+        let fetch = Task.detached(priority: .userInitiated) {
             SearchFetcher.fetch(container: container, request: request)
-        }.value
+        }
+        return await withTaskCancellationHandler {
+            await fetch.value
+        } onCancel: {
+            fetch.cancel()
+        }
     }
 
     /// Portal hits first (relevance order), then the local pass. Hydrates rows
@@ -245,16 +335,27 @@ struct SearchView: View {
         for series in hydrateSeries(ids: portal.series) {
             add(.series(series), categoryID: series.categoryId)
         }
-        for id in localHits.movies {
-            if let movie = modelContext.model(for: id) as? Movie { add(.movie(movie), categoryID: movie.categoryId) }
+        // The local fetches deliberately run without an ORDER BY so SQLite can
+        // stop at the per-type limit instead of sorting every match first (see
+        // `SearchFetcher.fetch`). The per-type, name-ascending order the list
+        // has always shown is restored here, over at most `resultLimit`
+        // hydrated rows per type. `localizedStandardCompare` is what
+        // `SortDescriptor(\.name)` used, so the ordering is unchanged.
+        for movie in sortedByName(hydrateSearchHits(localHits.movies, in: modelContext) as [Movie], name: \.name) {
+            add(.movie(movie), categoryID: movie.categoryId)
         }
-        for id in localHits.series {
-            if let series = modelContext.model(for: id) as? Series { add(.series(series), categoryID: series.categoryId) }
+        for series in sortedByName(hydrateSearchHits(localHits.series, in: modelContext) as [Series], name: \.name) {
+            add(.series(series), categoryID: series.categoryId)
         }
-        for id in localHits.streams {
-            if let stream = modelContext.model(for: id) as? LiveStream { add(.liveStream(stream), categoryID: stream.categoryId) }
+        for stream in sortedByName(hydrateSearchHits(localHits.streams, in: modelContext) as [LiveStream], name: \.name) {
+            add(.liveStream(stream), categoryID: stream.categoryId)
         }
         return matches
+    }
+
+    /// Name order, by the comparator `SortDescriptor(\.name)` defaults to.
+    private func sortedByName<Model>(_ models: [Model], name: KeyPath<Model, String>) -> [Model] {
+        models.sorted { $0[keyPath: name].localizedStandardCompare($1[keyPath: name]) == .orderedAscending }
     }
 
     /// Fetches `Movie` rows for the given ids in one query, returned in id order.
@@ -278,79 +379,69 @@ struct SearchView: View {
     }
 }
 
-// MARK: - Off-main search fetch
+// MARK: - Search field
 
-/// The matched rows' persistent identifiers, grouped by type. Plain value type
-/// so it can cross back from the background fetch context.
-private nonisolated struct SearchHits {
-    var movies: [PersistentIdentifier] = []
-    var series: [PersistentIdentifier] = []
-    var streams: [PersistentIdentifier] = []
-}
-
-/// The settled query and the per-type toggles, bundled so the off-main fetch
-/// takes a single `Sendable` value.
-private nonisolated struct SearchRequest {
-    let query: String
-    let playlistID: String
-    let restrictToPlaylist: Bool
-    let wantMovies: Bool
-    let wantSeries: Bool
-    let wantLive: Bool
-    let limit: Int
-}
-
-/// Runs the bounded `localizedStandardContains` fetches on a background
-/// `ModelContext` and returns only identifiers — never managed objects, which
-/// can't cross actor boundaries.
-private nonisolated enum SearchFetcher {
-    static func fetch(container: ModelContainer, request: SearchRequest) -> SearchHits {
-        let query = request.query
-        let playlistID = request.playlistID
-        let restrictToPlaylist = request.restrictToPlaylist
-        let limit = request.limit
-        let context = ModelContext(container)
-        var hits = SearchHits()
-
-        if request.wantMovies {
-            var descriptor = FetchDescriptor<Movie>(
-                predicate: #Predicate { movie in
-                    movie.name.localizedStandardContains(query)
-                        && (!restrictToPlaylist || (movie.categoryId?.localizedStandardContains(playlistID) ?? false))
-                },
-                sortBy: [SortDescriptor(\.name)]
-            )
-            descriptor.fetchLimit = limit
-            hits.movies = ((try? context.fetch(descriptor)) ?? []).map(\.persistentModelID)
-        }
-
-        if request.wantSeries {
-            var descriptor = FetchDescriptor<Series>(
-                predicate: #Predicate { series in
-                    series.name.localizedStandardContains(query)
-                        && (!restrictToPlaylist || (series.categoryId?.localizedStandardContains(playlistID) ?? false))
-                },
-                sortBy: [SortDescriptor(\.name)]
-            )
-            descriptor.fetchLimit = limit
-            hits.series = ((try? context.fetch(descriptor)) ?? []).map(\.persistentModelID)
-        }
-
-        if request.wantLive {
-            var descriptor = FetchDescriptor<LiveStream>(
-                predicate: #Predicate { stream in
-                    stream.name.localizedStandardContains(query)
-                        && (!restrictToPlaylist || (stream.categoryId?.localizedStandardContains(playlistID) ?? false))
-                },
-                sortBy: [SortDescriptor(\.name)]
-            )
-            descriptor.fetchLimit = limit
-            hits.streams = ((try? context.fetch(descriptor)) ?? []).map(\.persistentModelID)
-        }
-
-        return hits
+private extension View {
+    /// The search field, pinned at the top wherever it lands in the
+    /// navigation bar — iPad, the More list, and some iPhones — where it would
+    /// otherwise stay hidden until the list is pulled down (iPadOS 26 even
+    /// parks it as a collapsed magnifier button). Where the search tab puts
+    /// the field in the tab bar instead, that placement still wins.
+    func searchField(text: Binding<String>) -> some View {
+        modifier(SearchFieldModifier(text: text))
     }
 }
+
+private struct SearchFieldModifier: ViewModifier {
+    @Binding var text: String
+    #if os(tvOS)
+        @State private var fieldText = FieldText()
+    #endif
+
+    func body(content: Content) -> some View {
+        #if os(tvOS)
+            content.searchable(text: fieldBinding, prompt: "Movies, Series, Live TV...")
+        #else
+            content.searchable(text: $text, placement: placement, prompt: "Movies, Series, Live TV...")
+        #endif
+    }
+
+    #if os(tvOS)
+        /// Text typed on the iPhone Remote keyboard appears in the field and is
+        /// then deleted again, from the second letter on — the known tvOS
+        /// `.searchable` fight between the remote session and SwiftUI writing
+        /// its binding back into the field. The getter here answers with the
+        /// text the field itself last reported, read from a plain reference
+        /// rather than view state, so a write-back can never carry an older
+        /// value than the one on screen.
+        private var fieldBinding: Binding<String> {
+            let fieldText = fieldText
+            return Binding(
+                get: { fieldText.value },
+                set: { newValue in
+                    fieldText.value = newValue
+                    text = newValue
+                }
+            )
+        }
+    #endif
+
+    private var placement: SearchFieldPlacement {
+        #if os(iOS)
+            .navigationBarDrawer(displayMode: .always)
+        #else
+            .automatic
+        #endif
+    }
+}
+
+#if os(tvOS)
+    /// The search field's latest text. A class, and deliberately not
+    /// observable: writing it must not schedule a view update of its own.
+    private final class FieldText {
+        var value = ""
+    }
+#endif
 
 // MARK: - Search Key
 
@@ -406,134 +497,23 @@ enum SearchResult: Identifiable, Hashable {
         }
     }
 
+    /// The catalog row's own id, which carries the owning playlist's UUID as a
+    /// prefix. `id` above namespaces by kind so a movie and a channel can't
+    /// collide in the list; this one is what `owner(ofContentID:)` reads.
+    var contentID: String {
+        switch self {
+        case let .movie(movie): movie.id
+        case let .series(series): series.id
+        case let .liveStream(stream): stream.id
+        }
+    }
+
     static func == (lhs: SearchResult, rhs: SearchResult) -> Bool {
         lhs.id == rhs.id
     }
 
     func hash(into hasher: inout Hasher) {
         hasher.combine(id)
-    }
-}
-
-// MARK: - Search Result Row
-
-struct SearchResultRow: View {
-    let result: SearchResult
-
-    var body: some View {
-        HStack(spacing: 12) {
-            // Thumbnail
-            CachedAsyncImage(url: thumbnailURL, maxPixelSize: 90) { phase in
-                switch phase {
-                case .empty:
-                    Rectangle()
-                        .fill(Color.gray.opacity(0.3))
-                        .overlay {
-                            ProgressView()
-                        }
-                case let .success(image):
-                    image
-                        .resizable()
-                        .aspectRatio(contentMode: .fill)
-                case .failure:
-                    Rectangle()
-                        .fill(Color.gray.opacity(0.3))
-                        .overlay {
-                            Image(systemName: iconName)
-                                .foregroundStyle(.secondary)
-                        }
-                @unknown default:
-                    EmptyView()
-                }
-            }
-            .frame(width: 60, height: 90)
-            .clipShape(RoundedRectangle(cornerRadius: 8))
-
-            VStack(alignment: .leading, spacing: 4) {
-                Text(title)
-                    .font(.headline)
-                    .lineLimit(2)
-
-                Text(subtitle)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-
-                HStack(spacing: 4) {
-                    Image(systemName: categoryIcon)
-                    Text(LocalizedStringKey(categoryName))
-                }
-                .font(.caption2)
-                .foregroundStyle(.blue)
-            }
-
-            Spacer()
-        }
-    }
-
-    private var thumbnailURL: URL? {
-        switch result {
-        case let .movie(movie):
-            URL(string: movie.streamIcon ?? "")
-        case let .series(series):
-            URL(string: series.cover ?? "")
-        case let .liveStream(stream):
-            URL(string: stream.streamIcon ?? "")
-        }
-    }
-
-    private var title: String {
-        switch result {
-        case let .movie(movie):
-            movie.name
-        case let .series(series):
-            series.name
-        case let .liveStream(stream):
-            stream.name
-        }
-    }
-
-    private var subtitle: String {
-        switch result {
-        case let .movie(movie):
-            movie.genre ?? movie.releaseDate ?? ""
-        case let .series(series):
-            series.genre ?? series.releaseDate ?? ""
-        case .liveStream:
-            "Live"
-        }
-    }
-
-    private var categoryName: String {
-        switch result {
-        case .movie:
-            "Movie"
-        case .series:
-            "Series"
-        case .liveStream:
-            "Live TV"
-        }
-    }
-
-    private var categoryIcon: String {
-        switch result {
-        case .movie:
-            "film"
-        case .series:
-            "tv"
-        case .liveStream:
-            "antenna.radiowaves.left.and.right"
-        }
-    }
-
-    private var iconName: String {
-        switch result {
-        case .movie:
-            "film"
-        case .series:
-            "tv"
-        case .liveStream:
-            "antenna.radiowaves.left.and.right"
-        }
     }
 }
 

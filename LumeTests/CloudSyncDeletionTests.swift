@@ -16,41 +16,13 @@ import Testing
 
 @MainActor
 struct CloudSyncDeletionTests {
-    private func makeContainer() throws -> ModelContainer {
-        let fullSchema = Schema([
-            Playlist.self, Lume.Category.self, LiveStream.self, Movie.self,
-            Series.self, Episode.self, CastMember.self, EPGListing.self, EPGSource.self,
-            SyncedPlaylist.self, UserContentState.self, SyncedEPGSource.self
-        ])
-        // `cloudKitDatabase: .none` is required on both stores: the catalog uses
-        // `@Attribute(.unique)`, which CloudKit forbids, and the default
-        // `.automatic` mirrors to CloudKit on a signed/entitled test host and
-        // fails the load with `loadIssueModelContainer`.
-        let localConfig = ModelConfiguration(
-            "local",
-            schema: Schema([
-                Playlist.self, Lume.Category.self, LiveStream.self, Movie.self,
-                Series.self, Episode.self, CastMember.self, EPGListing.self, EPGSource.self
-            ]),
-            isStoredInMemoryOnly: true,
-            cloudKitDatabase: .none
-        )
-        let cloudConfig = ModelConfiguration(
-            "cloud",
-            schema: Schema([SyncedPlaylist.self, UserContentState.self, SyncedEPGSource.self]),
-            isStoredInMemoryOnly: true,
-            cloudKitDatabase: .none
-        )
-        return try ModelContainer(for: fullSchema, configurations: localConfig, cloudConfig)
-    }
-
     private func freshShadow() -> CloudSyncShadow {
         let suite = UserDefaults(suiteName: "cloudsync.deletion.test.\(UUID().uuidString)")!
         return CloudSyncShadow(defaults: suite)
     }
 
     @Test func `deleting the last playlist propagates to the cloud instead of resurrecting`() async throws {
-        let container = try makeContainer()
+        let container = try makeProfileTestContainer()
         let ctx = container.mainContext
         let shadow = freshShadow()
 
@@ -89,7 +61,7 @@ struct CloudSyncDeletionTests {
     }
 
     @Test func `deleting one of several playlists leaves the survivor untouched`() async throws {
-        let container = try makeContainer()
+        let container = try makeProfileTestContainer()
         let ctx = container.mainContext
 
         let doomed = Playlist(name: "Doomed", serverURL: "http://a", username: "u", password: "p")
@@ -116,8 +88,50 @@ struct CloudSyncDeletionTests {
         #expect(try ctx.fetch(FetchDescriptor<UserContentState>()).count == 1)
     }
 
+    /// `CloudSyncEngine.deletePlaylist` — not a bare main-context
+    /// `PlaylistDeletion` — is the required path for the last playlist (#136),
+    /// and it reaches the catalog sweep through
+    /// `PlaylistDeletion.removeOrphanedContent`. A WebDAV playlist adds one
+    /// thing nothing else collects: its device-local listing fingerprint in
+    /// `UserDefaults`, outside every SwiftData cascade. Left behind, the next
+    /// share added at the same UUID would skip its very first import.
+    @Test func `deleting a webdav playlist clears its catalog rows and its listing fingerprint`() async throws {
+        let container = try makeProfileTestContainer()
+        let ctx = container.mainContext
+
+        let playlist = Playlist(name: "NAS", webdavURL: "http://nas.local/Movies/", username: "u", password: "p")
+        let pid = playlist.id
+        ctx.insert(playlist)
+
+        let prefix = pid.uuidString
+        let movie = Movie(id: "\(prefix)-movie-1", streamId: 1, name: "A Film", categoryId: "\(prefix)-vod-1")
+        ctx.insert(movie)
+        let series = Series(id: "\(prefix)-series-1", seriesId: 1, name: "A Show", categoryId: "\(prefix)-series-1")
+        ctx.insert(series)
+        let episode = Episode(id: "\(prefix)-series-1-e1", episodeId: "1", title: "E1", containerExtension: "mkv", seasonNum: 2, episodeNum: 1)
+        ctx.insert(episode)
+        series.episodes.append(episode)
+        ctx.insert(Lume.Category(apiId: "1", name: "Movies", parentId: 0, type: .vod, playlist: playlist))
+        try ctx.save()
+
+        defer { WebDAVDigestStore.remove(playlistId: pid) }
+        WebDAVDigestStore.store("deadbeefcafe", playlistId: pid)
+
+        let engine = CloudSyncEngine(container: container, shadow: freshShadow())
+        _ = await engine.reconcile()
+        try await engine.deletePlaylist(id: pid)
+
+        #expect(try ctx.fetch(FetchDescriptor<Playlist>()).isEmpty)
+        #expect(try ctx.fetch(FetchDescriptor<Movie>()).isEmpty)
+        #expect(try ctx.fetch(FetchDescriptor<Series>()).isEmpty)
+        #expect(try ctx.fetch(FetchDescriptor<Episode>()).isEmpty)
+        #expect(try ctx.fetch(FetchDescriptor<Lume.Category>()).isEmpty)
+        #expect(try ctx.fetch(FetchDescriptor<SyncedPlaylist>()).isEmpty)
+        #expect(WebDAVDigestStore.digest(playlistId: pid) == nil)
+    }
+
     @Test func `deleting a never-synced playlist works without a mirror or shadow`() async throws {
-        let container = try makeContainer()
+        let container = try makeProfileTestContainer()
         let ctx = container.mainContext
 
         let playlist = Playlist(name: "Local Only", serverURL: "http://x", username: "u", password: "p")

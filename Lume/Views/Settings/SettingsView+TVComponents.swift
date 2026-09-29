@@ -2,41 +2,15 @@
 //  SettingsView+TVComponents.swift
 //  Lume
 //
-//  The tvOS sidebar categories, the About detail pane, and the SwiftUI previews,
-//  split out of SettingsView to keep that file within the project's size limit.
+//  The tvOS About and Help & Feedback detail panes, the Sports pane, and the
+//  SwiftUI previews, split out of SettingsView to keep that file within the
+//  project's size limit. The categories themselves are `SettingsCategory`.
 //
 
 import SwiftData
 import SwiftUI
 
 #if os(tvOS)
-
-    // MARK: - tvOS settings categories
-
-    /// The top-level settings categories shown in the tvOS sidebar.
-    enum SettingsCategory: String, CaseIterable, Identifiable {
-        case premium, playlists, profiles, content, home, epg, search, integrations, player, storage, about
-
-        var id: String {
-            rawValue
-        }
-
-        var title: LocalizedStringKey {
-            switch self {
-            case .premium: "Premium"
-            case .playlists: "Playlists"
-            case .profiles: "Profiles"
-            case .content: "Content"
-            case .home: "Home"
-            case .epg: "TV Guide"
-            case .search: "Search"
-            case .storage: "Storage"
-            case .integrations: "Integrations"
-            case .player: "Player"
-            case .about: "About"
-            }
-        }
-    }
 
     extension SettingsView {
         /// The drilled-in options pane for a single engine.
@@ -71,6 +45,20 @@ import SwiftUI
             return cycle[(index + 1) % cycle.count]
         }
 
+        /// Advances the hand-off scope through both → VOD → live TV → both.
+        func nextExternalPlayerScopeRaw(after raw: String) -> String {
+            let cycle = ExternalPlayerScope.allCases.map(\.rawValue)
+            guard let index = cycle.firstIndex(of: raw) else { return ExternalPlayerScope.default.rawValue }
+            return cycle[(index + 1) % cycle.count]
+        }
+
+        /// Advances the surf mapping between the two `LiveSurfMode` cases.
+        func nextLiveSurfModeRaw(after raw: String) -> String {
+            let cycle = LiveSurfMode.allCases.map(\.rawValue)
+            guard let index = cycle.firstIndex(of: raw) else { return LiveSurfMode.default.rawValue }
+            return cycle[(index + 1) % cycle.count]
+        }
+
         var tvAboutDetail: some View {
             VStack(alignment: .leading, spacing: 36) {
                 VStack(alignment: .leading, spacing: 8) {
@@ -97,9 +85,15 @@ import SwiftUI
                     .padding(.vertical, 8)
                 }
 
+                tvCreditsSection
+            }
+        }
+
+        var tvHelpDetail: some View {
+            VStack(alignment: .leading, spacing: 36) {
                 tvSupportSection
 
-                tvCreditsSection
+                TVDiagnosticsSection()
             }
         }
 
@@ -149,6 +143,76 @@ import SwiftUI
                 RoundedRectangle(cornerRadius: TVSettingsMetrics.rowCornerRadius, style: .continuous)
                     .fill(Color.white.opacity(0.05))
             )
+        }
+    }
+
+    // MARK: - Sports pane
+
+    /// The Sports settings pane: a Manage Teams shortcut, Hide Scores, a manual
+    /// refresh bound to `SportsSyncService`, and the last-refresh stamp. The tab
+    /// switch lives in Library. Standalone
+    /// so it owns its own presentation and refresh state.
+    struct TVSportsSettingsPane: View {
+        @AppStorage(SportsSyncService.hideScoresKey) private var hideScores = false
+        @State private var sync = SportsSyncService.shared
+        @State private var showManageTeams = false
+
+        var body: some View {
+            VStack(alignment: .leading, spacing: 36) {
+                VStack(alignment: .leading, spacing: 8) {
+                    TVSettingsSectionLabel("Sports")
+
+                    Button {
+                        showManageTeams = true
+                    } label: {
+                        HStack(spacing: 16) {
+                            Label("Manage Teams", systemImage: "person.2.badge.plus")
+                            Spacer(minLength: 0)
+                            Image(systemName: "chevron.right")
+                                .font(.system(size: 22, weight: .semibold))
+                        }
+                    }
+                    .buttonStyle(TVSettingsRowButtonStyle())
+
+                    TVOptionToggleRow(title: "Hide Scores", isOn: $hideScores)
+                }
+
+                VStack(alignment: .leading, spacing: 8) {
+                    TVSettingsSectionLabel("Sports Data")
+
+                    Button {
+                        sync.syncNow()
+                    } label: {
+                        HStack(spacing: 16) {
+                            Text(sync.isSyncing ? "Refreshing…" : "Refresh Now")
+                            Spacer(minLength: 0)
+                            if sync.isSyncing {
+                                ProgressView()
+                            }
+                        }
+                    }
+                    .buttonStyle(TVSettingsRowButtonStyle())
+                    .disabled(sync.isSyncing)
+
+                    TVSettingsValueRow("Last Refreshed", value: lastRefreshText)
+                }
+
+                Text("Follow leagues and teams to build your Sports Hub. Fixtures, live scores and standings come from ESPN, and each game links to a channel in your playlists.")
+                    .font(.system(size: 20))
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, TVSettingsMetrics.rowHPadding)
+            }
+            .fullScreenCover(isPresented: $showManageTeams) {
+                TVManageTeamsPane()
+            }
+        }
+
+        /// A relative "last refreshed" line, or "Never" before the first refresh.
+        private var lastRefreshText: String {
+            if let last = sync.lastRefresh {
+                return last.formatted(.relative(presentation: .named))
+            }
+            return String(localized: "Never")
         }
     }
 

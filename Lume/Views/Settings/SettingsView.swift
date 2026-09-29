@@ -2,68 +2,78 @@ import SwiftData
 import SwiftUI
 
 struct SettingsView: View {
-    @Environment(\.modelContext) private var modelContext
+    @Environment(\.modelContext) var modelContext
     @Environment(\.dismiss) private var dismiss
-    /// Not `private`: read by the SettingsView+Profiles extension (separate file).
-    @Environment(ProfileManager.self) var profileManager: ProfileManager?
-    @Environment(CloudSyncCoordinator.self) private var cloudSync: CloudSyncCoordinator?
-    /// Not `private`: read by the SettingsView+AutoSync extension (separate file).
+    /// Not `private`: read by the SettingsView+Library extension (separate file).
+    @Environment(CloudSyncCoordinator.self) var cloudSync: CloudSyncCoordinator?
+    /// Not `private`: read by the SettingsView+Playlists / +Library extensions (separate files).
     @Query var playlists: [Playlist]
-    /// Not `private`: read by the SettingsView+Playlists extension (separate file).
-    @State var showingAddPlaylist = false
     @State private var trakt = TraktService.shared
+    @State private var simkl = SimklService.shared
     /// Premium entitlement + paywall presentation. Not `private`: read by the
-    /// SettingsView+Playlists / +TVComponents extensions (separate files).
+    /// SettingsView+Premium / +Playlists / +TVPlayer extensions (separate files).
     @State var premium = PremiumManager.shared
     @State var showPaywall = false
     @State var paywallHighlight: PremiumFeature?
-    #if DEBUG && !SIDE_LOAD
-        /// Force-recompute counter for the DEBUG developer section (separate file).
-        @AppStorage(RecommendationSettings.manualRecalculationKey) var recommendationsRecalcToken = 0
-    #endif
-    /// Legacy single-engine key, kept in sync with the primary engine so a
-    /// downgrade still finds the user's preferred engine, and read as the
-    /// migration seed for the priority list. See `PlayerEnginePriority`.
-    /// Not `private`: engine / playback preferences are read by the
-    /// SettingsView+TVPlayer extension (separate file, tvOS player pane).
-    @AppStorage(PlayerSettings.engineKey) var engineRaw: String = PlayerEngineKind.defaultValue.rawValue
-    @AppStorage(PlayerSettings.enginePriorityKey) var enginePriorityRaw: String = ""
-    @AppStorage(PlayerSettings.externalPlayerKey) var externalPlayerRaw: String = ""
-    @AppStorage(PlayerSettings.Playback.autoPlayNextKey)
-    var autoPlayNext = PlayerSettings.Playback.autoPlayNextDefault
-    @AppStorage(PlayerSettings.Playback.showNextEpisodeButtonKey)
-    var showNextEpisodeButton = PlayerSettings.Playback.showNextEpisodeButtonDefault
-    @AppStorage(PlayerSettings.Playback.showSkipIntroButtonKey)
-    var showSkipIntroButton = PlayerSettings.Playback.showSkipIntroButtonDefault
-    @AppStorage(SearchSettings.searchAllPlaylistsKey)
-    private var searchAllPlaylists = SearchSettings.searchAllPlaylistsDefault
+    /// The globally-selected playlist, shared with the content tabs. Library's
+    /// tab switches apply to it, and on tvOS (no toolbar switcher) the Playlists
+    /// pane is also where it is chosen, the Play/Pause quick-switch overlay the
+    /// fast path. Not `private`: read by the SettingsView+Playlists / +Library
+    /// extensions (separate files).
+    @AppStorage(PlaylistSelectionStore.key) var selectedPlaylistID: String = ""
     #if !os(tvOS)
-        /// The app-wide appearance override (System / Dark / Light), applied at
-        /// the scene root in `LumeApp`. Not offered on tvOS — the TV UI is
-        /// designed dark and a per-app light mode makes no sense there.
+        /// The app-wide appearance override (System / Dark / Light), shown as the
+        /// Appearance row's value. Not offered on tvOS — the TV UI is designed
+        /// dark and a per-app light mode makes no sense there.
         @AppStorage(AppAppearance.storageKey)
         private var appearanceRaw = AppAppearance.defaultValue.rawValue
     #endif
-    /// Not `private`: read by the SettingsView+AutoSync extension (separate file).
-    @AppStorage(SyncFrequency.storageKey) var syncFrequencyRaw: String = SyncFrequency.defaultValue.rawValue
-    #if !os(tvOS)
-        @AppStorage(DownloadManager.maxConcurrentKey) private var maxConcurrent = 1
-        @AppStorage(DownloadManager.autoDeleteKey) private var autoDeleteAfterWatching = false
-    #endif
 
     #if os(tvOS)
-        /// The globally-selected playlist, shared with the content tabs. tvOS has
-        /// no toolbar switcher, so the Playlists settings pane is where the active
-        /// playlist is chosen. Not `private`: read by the SettingsView+Playlists
-        /// extension (separate file).
-        @AppStorage(PlaylistSelectionStore.key) var selectedPlaylistID: String = ""
+        /// Legacy single-engine key, kept in sync with the primary engine so a
+        /// downgrade still finds the user's preferred engine, and read as the
+        /// migration seed for the priority list. See `PlayerEnginePriority`.
+        /// Not `private`: engine / playback preferences are read by the
+        /// SettingsView+TVPlayer extension (separate file, tvOS player pane).
+        @AppStorage(PlayerSettings.engineKey) var engineRaw: String = PlayerEngineKind.defaultValue.rawValue
+        @AppStorage(PlayerSettings.enginePriorityKey) var enginePriorityRaw: String = ""
+        @AppStorage(PlayerSettings.externalPlayerKey) var externalPlayerRaw: String = ""
+        @AppStorage(PlayerSettings.externalPlayerScopeKey)
+        var externalPlayerScopeRaw: String = ExternalPlayerScope.default.rawValue
+        @AppStorage(PlayerSettings.liveSurfModeKey)
+        var liveSurfModeRaw: String = LiveSurfMode.default.rawValue
+        @AppStorage(PlayerSettings.tvRemoteSwipesKey)
+        var tvRemoteSwipes = PlayerSettings.tvRemoteSwipesDefault
+        @AppStorage(PlayerSettings.Playback.autoPlayNextKey)
+        var autoPlayNext = PlayerSettings.Playback.autoPlayNextDefault
+        /// tvOS only: off tvOS the transport row carries an always-available
+        /// Next Episode button, so `PlayerNextUpOverlay`'s outro-armed one —
+        /// and with it this switch — has nothing left to control.
+        @AppStorage(PlayerSettings.Playback.showNextEpisodeButtonKey)
+        var showNextEpisodeButton = PlayerSettings.Playback.showNextEpisodeButtonDefault
+        @AppStorage(PlayerSettings.Playback.showSkipIntroButtonKey)
+        var showSkipIntroButton = PlayerSettings.Playback.showSkipIntroButtonDefault
+        /// Comma-separated preferred languages, empty meaning no preference (see `PreferredLanguageList`).
+        @AppStorage(PlayerSettings.Language.preferredAudioLanguagesKey)
+        var preferredAudioLanguagesRaw = PlayerSettings.Language.preferredAudioLanguagesDefault
+        @AppStorage(PlayerSettings.StreamInfo.detailLevelKey)
+        var streamInfoDetailLevelRaw = PlayerSettings.StreamInfo.detailLevelDefault.rawValue
+        /// Not `private`: read by the SettingsView+Library extension (separate file).
+        @AppStorage(SearchSettings.searchAllPlaylistsKey)
+        var searchAllPlaylists = SearchSettings.searchAllPlaylistsDefault
+        @AppStorage(SportsSyncService.tabEnabledKey) var sportsTabEnabled = SportsSyncService.tabEnabledDefault
+        /// Not `private`: read by the SettingsView+AutoSync extension (separate file).
+        @AppStorage(SyncFrequency.storageKey) var syncFrequencyRaw: String = SyncFrequency.defaultValue.rawValue
+
         /// Routes the switch through the blocking overlay (see PlaylistSwitchModel).
         /// Not `private`: read by the SettingsView+Playlists extension.
         @Environment(PlaylistSwitchModel.self) var playlistSwitch: PlaylistSwitchModel?
+        /// Not `private`: the Add Playlist row (SettingsView+Playlists) presents it.
+        @State var showingAddPlaylist = false
         /// The category whose content is shown in the right pane. Follows focus
         /// in the sidebar (Apple TV Settings behaviour) and persists once focus
         /// moves into the detail pane.
-        @State private var selectedCategory: SettingsCategory = .premium
+        @State private var selectedCategory: SettingsCategory = .profiles
         @FocusState private var focusedCategory: SettingsCategory?
         /// The playlist drilled into within the Playlists category. When set, its
         /// settings replace the playlist list *in the detail pane* rather than
@@ -71,23 +81,50 @@ struct SettingsView: View {
         /// strands remote focus once the content scrolls. Not `private`: read by
         /// the SettingsView+Playlists extension (separate file).
         @State var selectedPlaylist: Playlist?
-        /// The engine whose options are drilled into within the Player category,
-        /// replacing the player detail in place (same reasoning as `selectedPlaylist`).
-        /// Not `private`: read by the SettingsView+TVPlayer extension (separate file).
+        /// Whether Library's Categories & Channels is drilled into, replacing the
+        /// whole detail pane (same reasoning as `selectedPlaylist`). Not
+        /// `private`: set by the SettingsView+Library extension (separate file).
+        @State var showingContentManagement = false
+        /// Whether the Player category is drilled into Engines — the priority
+        /// list and the per-engine option rows — in place. Not `private`: read
+        /// by the SettingsView+TVPlayer extension (separate file).
+        @State var showingEngines = false
+        /// Whether the Player category is drilled into OpenSubtitles in place.
+        /// Not `private`: set by the SettingsView+TVPlayer extension (separate file).
+        @State var showingOpenSubtitles = false
+        /// The engine whose options are drilled into from Engines, replacing it
+        /// in place (same reasoning as `selectedPlaylist`). Not `private`: read by
+        /// the SettingsView+TVPlayer extension (separate file).
         @State var selectedEngineOptions: PlayerEngineKind?
+        /// Which preferred-language pane is drilled into within the Player
+        /// category — the ordered list, or its add picker one level deeper —
+        /// replacing the player detail in place (same reasoning as
+        /// `selectedEngineOptions`). Not `private`: read by the
+        /// SettingsView+TVPlayer extension (separate file).
+        @State var preferredLanguagePane: PreferredLanguagePane?
+
+        enum PreferredLanguagePane {
+            case list, add
+        }
+
         /// Home layout preferences, shown in the Home category. Not `private`: read
         /// by the SettingsView+TVHome extension (separate file). The iOS/macOS build
         /// has its own `HomeLayoutSettingsView`, so these live in the tvOS block.
         @AppStorage(RecommendationSettings.enabledKey) var recommendationsEnabled = RecommendationSettings.enabledDefault
         @AppStorage(HomeLayoutSettings.sectionOrderKey) var homeSectionOrderRaw = ""
         @AppStorage(HomeLayoutSettings.disabledSectionsKey) var homeDisabledSectionsRaw = ""
+
+        /// The user's ordered engine fallback list (migrates the legacy single-engine
+        /// key on first read). The first entry is the primary engine. Not `private`:
+        /// read by the SettingsView+TVPlayer extension (separate file).
+        var enginePriority: [PlayerEngineKind] {
+            PlayerEnginePriority.resolve(priorityRaw: enginePriorityRaw, legacyEngineRaw: engineRaw)
+        }
     #endif
 
-    /// The user's ordered engine fallback list (migrates the legacy single-engine
-    /// key on first read). The first entry is the primary engine. Not `private`:
-    /// read by the SettingsView+TVPlayer extension (separate file).
-    var enginePriority: [PlayerEngineKind] {
-        PlayerEnginePriority.resolve(priorityRaw: enginePriorityRaw, legacyEngineRaw: engineRaw)
+    /// Whether this build has credentials for any Connected Services entry.
+    private var hasConnectedServices: Bool {
+        trakt.isConfigured || simkl.isConfigured
     }
 
     var body: some View {
@@ -104,29 +141,19 @@ struct SettingsView: View {
         private var standardBody: some View {
             NavigationStack {
                 List {
-                    premiumStatusSection
-                    profilesSection
-                    playlistsSection
-                    librarySection
-                    layoutSection
-                    appearanceSection
-                    searchSection
-                    autoSyncSection
-                    epgSection
-                    CloudSyncSection()
-                    if trakt.isConfigured {
-                        integrationsSection
+                    ForEach(SettingsCategory.grouped(hasConnectedServices: hasConnectedServices), id: \.group) { entry in
+                        Section {
+                            ForEach(entry.categories) { category in
+                                row(for: category)
+                            }
+                        } header: {
+                            if let title = entry.group.title {
+                                Text(title)
+                            }
+                        }
                     }
-                    playbackSection
-                    downloadsSection
-                    playerSection
-                    storageSection
-                    supportSection
-                    aboutSection
-                    #if DEBUG && !SIDE_LOAD
-                        developerSection
-                    #endif
-                    diagnosticsSection
+                    HelpFeedbackSection()
+                    AboutSection()
                 }
                 #if os(macOS)
                 .listStyle(.inset(alternatesRowBackgrounds: true))
@@ -138,269 +165,88 @@ struct SettingsView: View {
                 #endif
                 .platformNavigationTitle("Settings")
                 .paywall(isPresented: $showPaywall, highlight: paywallHighlight)
-                .sheet(isPresented: $showingAddPlaylist) {
-                    LoginView(isModal: true)
-                }
             }
             #if os(macOS)
             .frame(minWidth: 480, idealWidth: 540, minHeight: 480, idealHeight: 600)
             #endif
         }
 
-        private var playlistsSection: some View {
-            Section {
-                if playlists.isEmpty {
-                    HStack {
-                        Spacer()
-                        VStack(spacing: 4) {
-                            Text("No Playlists")
-                                .foregroundStyle(.secondary)
-                            Button("Add Playlist") {
-                                showingAddPlaylist = true
-                            }
-                            .buttonStyle(.borderedProminent)
-                            .controlSize(.small)
-                        }
-                        Spacer()
-                    }
-                    .padding(.vertical, 12)
-                    .listRowInsets(EdgeInsets())
-                } else {
-                    ForEach(playlists) { playlist in
-                        NavigationLink {
-                            PlaylistDetailView(playlist: playlist)
-                        } label: {
-                            HStack(spacing: 10) {
-                                Image(systemName: "tv")
-                                    .foregroundStyle(.secondary)
-                                    .font(.body)
-
-                                VStack(alignment: .leading, spacing: 1) {
-                                    Text(playlist.name)
-                                    Text(playlist.serverURL)
-                                        .font(.caption)
-                                        .foregroundStyle(.secondary)
-                                        .lineLimit(1)
-                                        .truncationMode(.middle)
-                                }
-                            }
-                            .padding(.vertical, 1)
-                        }
-                    }
-                    .onDelete(perform: deletePlaylists)
-
-                    Button {
-                        if canAddPlaylist {
-                            showingAddPlaylist = true
-                        } else {
-                            presentPaywall(.multiplePlaylists)
-                        }
-                    } label: {
-                        Label("Add Playlist", systemImage: canAddPlaylist ? "plus" : "crown")
-                    }
-                }
-            } header: {
-                Text("Playlists")
-            } footer: {
-                if playlists.isEmpty {
-                    EmptyView()
-                } else if premium.isPremium {
-                    Text("\(playlists.count) playlist\(playlists.count == 1 ? "" : "s")")
-                } else {
-                    Text("Free includes one playlist. Upgrade to Lume Pro to add more.")
-                }
-            }
-        }
-
-        private var librarySection: some View {
-            Section {
-                NavigationLink {
-                    ParentalGateView { ContentManagementView() }
+        @ViewBuilder
+        private func row(for category: SettingsCategory) -> some View {
+            if category == .premium, !premium.isPremium {
+                // The free plan's row opens the paywall itself rather than a
+                // page that would only repeat it.
+                Button {
+                    presentPaywall(nil)
                 } label: {
-                    Label("Content Management", systemImage: "slider.horizontal.3")
-                }
-                .disabled(playlists.isEmpty)
-            } header: {
-                Text("Library")
-            } footer: {
-                Text("Hide and reorder categories and channels for the active playlist.")
-            }
-        }
-
-        private var layoutSection: some View {
-            Section {
-                NavigationLink {
-                    HomeLayoutSettingsView()
-                } label: {
-                    Label("Home", systemImage: "house")
-                }
-            } header: {
-                Text("Layout")
-            } footer: {
-                Text("Choose which sections appear on Home and in what order.")
-            }
-        }
-
-        private var appearanceSection: some View {
-            Section {
-                Picker("Appearance", selection: $appearanceRaw) {
-                    ForEach(AppAppearance.allCases) { appearance in
-                        Text(appearance.title).tag(appearance.rawValue)
+                    HStack(spacing: 8) {
+                        SettingsCategoryRowLabel(category: category, value: Text("Free"))
+                        Image(systemName: "chevron.right")
+                            .font(.footnote.weight(.semibold))
+                            .foregroundStyle(.tertiary)
                     }
+                    .contentShape(Rectangle())
                 }
-                .pickerStyle(.menu)
-            } header: {
-                Text("Appearance")
-            } footer: {
-                Text("Follow the device appearance, or keep Lume always in Dark or Light Mode.")
-            }
-        }
-
-        private var searchSection: some View {
-            Section {
-                Toggle("Search All Playlists", isOn: $searchAllPlaylists)
-            } header: {
-                Text("Search")
-            } footer: {
-                Text("When off, search only finds content in the active playlist. Turn this on to search across all your playlists.")
-            }
-        }
-
-        private var integrationsSection: some View {
-            Section {
-                NavigationLink {
-                    TraktIntegrationView()
-                } label: {
-                    HStack {
-                        Label("Trakt", systemImage: "rectangle.stack.badge.play")
-                        Spacer()
-                        if trakt.isConnected {
-                            Text(trakt.username.map { "@\($0)" } ?? "Connected")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                        }
-                    }
-                }
-            } header: {
-                Text("Integrations")
-            } footer: {
-                Text("Sync watched movies and episodes, and show your Trakt watchlist on Home.")
-            }
-        }
-
-        private var playbackSection: some View {
-            Section {
-                Toggle("Autoplay Next Episode", isOn: $autoPlayNext)
-                    .disabled(!premium.isPremium)
-                Toggle("Show Next Episode Button", isOn: $showNextEpisodeButton)
-                    .disabled(!premium.isPremium)
-                Toggle("Show Skip Intro Button", isOn: $showSkipIntroButton)
-                    .disabled(!premium.isPremium)
-                if !premium.isPremium {
-                    Button {
-                        presentPaywall(.playbackControls)
-                    } label: {
-                        Label("Unlock with Premium", systemImage: "crown")
-                    }
-                }
-            } header: {
-                Text("Playback")
-            } footer: {
-                Text("Automatically start the next episode when one finishes, and show a button near the end to skip ahead.")
-            }
-        }
-
-        private var downloadsSection: some View {
-            Section {
-                NavigationLink {
-                    DownloadsView()
-                } label: {
-                    Label("Manage Downloads", systemImage: "arrow.down.circle")
-                }
-
-                Stepper(
-                    "Max Simultaneous Downloads: \(maxConcurrent)",
-                    value: $maxConcurrent,
-                    in: 1 ... 5
-                )
-
-                Toggle("Auto-Delete After Watching", isOn: $autoDeleteAfterWatching)
-            } header: {
-                Text("Downloads")
-            } footer: {
-                Text("Download movies and episodes for offline playback. Auto-delete removes the file once you've finished watching.")
-            }
-        }
-
-        private var playerSection: some View {
-            Section {
-                NavigationLink {
-                    PlayerEnginePriorityView()
-                } label: {
-                    HStack {
-                        Text("Player Engines")
-                        Spacer()
-                        Text(enginePriority.map(\.displayName).joined(separator: " › "))
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                            .lineLimit(1)
-                            .truncationMode(.tail)
-                    }
-                }
-
-                NavigationLink("VLCKit Options") { VLCEngineSettingsScreen() }
-                NavigationLink("KSPlayer Options") { KSEngineSettingsScreen() }
-                NavigationLink("Lume Engine Options") { LumeEngineSettingsScreen() }
-
-                Picker("External Player", selection: $externalPlayerRaw) {
-                    Text("Off").tag("")
-                    ForEach(ExternalPlayer.allCases) { player in
-                        Text(player.displayName).tag(player.rawValue)
-                    }
-                }
-                .pickerStyle(.menu)
-            } header: {
-                Text("Player")
-            } footer: {
-                Text("Lume plays each stream with your preferred engine and falls back to the next if it can't be played. Streams open in the selected external app instead, when one is installed.")
-            }
-        }
-
-        private var storageSection: some View {
-            Section {
-                NavigationLink {
-                    StorageManagementView()
-                } label: {
-                    Label("Storage & Cache", systemImage: "internaldrive")
-                }
-            } header: {
-                Text("Storage")
-            }
-        }
-
-        private func deletePlaylists(offsets: IndexSet) {
-            // Route through the sync engine so the deletion also clears the
-            // CloudKit mirror and shadow baseline — deleting on the view
-            // context alone leaves a surviving mirror that resurrects the last
-            // playlist (#136). Previews have no coordinator; local-only
-            // deletion is fine there.
-            if let cloudSync {
-                let ids = offsets.map { playlists[$0].id }
-                Task {
-                    for id in ids {
-                        await cloudSync.deletePlaylist(id: id)
-                    }
-                }
+                .buttonStyle(.plain)
             } else {
-                withAnimation {
-                    for index in offsets {
-                        PlaylistDeletion.delete(playlists[index], in: modelContext)
-                    }
+                NavigationLink {
+                    SettingsCategoryDestination(category: category)
+                } label: {
+                    SettingsCategoryRowLabel(category: category, value: value(for: category))
                 }
+            }
+        }
+
+        /// The trailing value: only for single-choice pages, plus the Lume Pro
+        /// and iCloud status.
+        private func value(for category: SettingsCategory) -> Text? {
+            switch category {
+            case .premium:
+                Text(premium.isPremium ? "Pro" : "Free")
+            case .appearance:
+                Text((AppAppearance(rawValue: appearanceRaw) ?? .defaultValue).title)
+            case .iCloud:
+                cloudSync.map { Text(CloudSyncStatusText.summary($0.status)) }
+            default:
+                nil
             }
         }
     #endif
 }
+
+#if !os(tvOS)
+
+    /// The page behind a root Settings row.
+    private struct SettingsCategoryDestination: View {
+        let category: SettingsCategory
+
+        var body: some View {
+            switch category {
+            case .premium: PremiumPlanView()
+            case .profiles: ManageProfilesView()
+            case .playlists: PlaylistsSettingsView()
+            case .epg: EPGSettingsView()
+            case .library: LibrarySettingsView()
+            case .home: HomeLayoutSettingsView()
+            case .sports: SportsSettingsView()
+            case .appearance: AppearanceSettingsView()
+            case .player: PlayerSettingsView()
+            case .downloads: DownloadsSettingsView()
+            case .iCloud: CloudSyncSettingsView()
+            case .connectedServices: ConnectedServicesView()
+            case .storage: StorageManagementView()
+            case .help, .about: EmptyView() // inline sections on the root
+            case .developer:
+                #if DEBUG && !SIDE_LOAD
+                    DeveloperSettingsView()
+                #else
+                    EmptyView()
+                #endif
+            }
+        }
+    }
+
+#endif
 
 // MARK: - tvOS (Apple TV Settings-style two-pane layout)
 
@@ -415,7 +261,7 @@ struct SettingsView: View {
                 }
                 .tvSettingsBackground()
                 .paywall(isPresented: $showPaywall, highlight: paywallHighlight)
-                .defaultFocus($focusedCategory, .premium)
+                .defaultFocus($focusedCategory, .profiles)
                 .onChange(of: focusedCategory) { _, newValue in
                     // Follow focus so the detail pane mirrors the highlighted
                     // category. Ignore nil (focus moved into the detail pane),
@@ -423,10 +269,15 @@ struct SettingsView: View {
                     if let newValue {
                         selectedCategory = newValue
                         // Returning focus to the sidebar leaves any drilled-in
-                        // detail (a playlist, or an engine's options), so the
-                        // pane reverts to its top-level list.
+                        // detail (a playlist, Categories & Channels, Engines or
+                        // an engine's options), so the pane reverts to its
+                        // top-level list.
                         selectedPlaylist = nil
+                        showingContentManagement = false
+                        showingEngines = false
+                        showingOpenSubtitles = false
                         selectedEngineOptions = nil
+                        preferredLanguagePane = nil
                     }
                 }
                 .fullScreenCover(isPresented: $showingAddPlaylist) {
@@ -442,16 +293,22 @@ struct SettingsView: View {
                     .padding(.horizontal, TVSettingsMetrics.rowHPadding)
                     .padding(.bottom, 28)
 
-                VStack(spacing: 2) {
-                    ForEach(availableCategories) { category in
-                        Button {
-                            selectedCategory = category
-                        } label: {
-                            Text(category.title)
-                                .frame(maxWidth: .infinity, alignment: .leading)
+                // Groups are set apart by spacing alone; the sidebar has no
+                // headers or icons, like the Apple TV Settings app.
+                VStack(spacing: 14) {
+                    ForEach(SettingsCategory.grouped(hasConnectedServices: hasConnectedServices), id: \.group) { entry in
+                        VStack(spacing: 2) {
+                            ForEach(entry.categories) { category in
+                                Button {
+                                    selectedCategory = category
+                                } label: {
+                                    Text(category.title)
+                                        .frame(maxWidth: .infinity, alignment: .leading)
+                                }
+                                .buttonStyle(TVSettingsSidebarButtonStyle(isSelected: selectedCategory == category))
+                                .focused($focusedCategory, equals: category)
+                            }
                         }
-                        .buttonStyle(TVSettingsSidebarButtonStyle(isSelected: selectedCategory == category))
-                        .focused($focusedCategory, equals: category)
                     }
                 }
 
@@ -464,21 +321,14 @@ struct SettingsView: View {
             .focusSection()
         }
 
-        /// The sidebar categories. Integrations is hidden unless the build has
-        /// Trakt credentials configured.
-        private var availableCategories: [SettingsCategory] {
-            SettingsCategory.allCases.filter { $0 != .integrations || trakt.isConfigured }
-        }
-
         /// Content Management brings its own scroll/background, so it replaces the
         /// detail pane wholesale rather than nesting inside the scrolling detail.
         @ViewBuilder
         private var tvDetailContainer: some View {
-            switch selectedCategory {
-            case .content:
+            if selectedCategory == .library, showingContentManagement {
                 ParentalGateView { ContentManagementView() }
                     .focusSection()
-            default:
+            } else {
                 tvDetail
             }
         }
@@ -489,6 +339,8 @@ struct SettingsView: View {
                     switch selectedCategory {
                     case .premium:
                         tvPremiumDetail
+                    case .profiles:
+                        TVProfilesSettingsView()
                     case .playlists:
                         if let selectedPlaylist {
                             PlaylistDetailView(playlist: selectedPlaylist) {
@@ -497,20 +349,38 @@ struct SettingsView: View {
                         } else {
                             tvPlaylistsDetail
                         }
-                    case .profiles: TVProfilesSettingsView()
-                    case .home: tvHomeLayoutDetail
-                    case .epg: EPGSettingsView()
-                    case .search: tvSearchDetail
-                    case .storage: StorageManagementView()
-                    case .integrations: tvIntegrationsDetail
+                    case .epg:
+                        EPGSettingsView()
+                    case .library:
+                        tvLibraryDetail
+                    case .home:
+                        tvHomeLayoutDetail
+                    case .sports:
+                        TVSportsSettingsPane()
                     case .player:
-                        if let selectedEngineOptions {
+                        if showingOpenSubtitles {
+                            TVOpenSubtitlesIntegrationView()
+                        } else if let selectedEngineOptions {
                             tvEngineOptionsDetail(for: selectedEngineOptions)
+                        } else if showingEngines {
+                            tvEnginesDetail
+                        } else if let preferredLanguagePane {
+                            tvPreferredLanguageDetail(preferredLanguagePane)
                         } else {
                             tvPlayerDetail
                         }
-                    case .about: tvAboutDetail
-                    case .content: EmptyView() // handled by tvDetailContainer
+                    case .iCloud:
+                        TVCloudSyncSection()
+                    case .connectedServices:
+                        tvIntegrationsDetail
+                    case .storage:
+                        StorageManagementView()
+                    case .help:
+                        tvHelpDetail
+                    case .about:
+                        tvAboutDetail
+                    case .appearance, .downloads, .developer:
+                        EmptyView() // not offered on tvOS
                     }
                 }
                 .frame(maxWidth: TVSettingsMetrics.detailMaxWidth, alignment: .leading)
@@ -522,18 +392,13 @@ struct SettingsView: View {
         }
 
         private var tvIntegrationsDetail: some View {
-            TVTraktIntegrationView()
-        }
-
-        private var tvSearchDetail: some View {
-            VStack(alignment: .leading, spacing: 8) {
-                TVSettingsSectionLabel("Search")
-                TVOptionToggleRow(title: "Search All Playlists", isOn: $searchAllPlaylists)
-                Text("When off, search only finds content in the active playlist. Turn this on to search across all your playlists.")
-                    .font(.system(size: 20))
-                    .foregroundStyle(.secondary)
-                    .padding(.horizontal, TVSettingsMetrics.rowHPadding)
-                    .padding(.top, 6)
+            VStack(alignment: .leading, spacing: 36) {
+                if trakt.isConfigured {
+                    TVTraktIntegrationView()
+                }
+                if simkl.isConfigured {
+                    TVSimklIntegrationView()
+                }
             }
         }
     }

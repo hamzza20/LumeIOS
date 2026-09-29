@@ -181,41 +181,13 @@ struct CloudSyncConflictPolicyTests {
 
 @MainActor
 struct CloudSyncEngineTests {
-    private func makeContainer() throws -> ModelContainer {
-        let fullSchema = Schema([
-            Playlist.self, Lume.Category.self, LiveStream.self, Movie.self,
-            Series.self, Episode.self, CastMember.self, EPGListing.self, EPGSource.self,
-            SyncedPlaylist.self, UserContentState.self, SyncedEPGSource.self
-        ])
-        // `cloudKitDatabase: .none` is required on both stores: the catalog uses
-        // `@Attribute(.unique)`, which CloudKit forbids, and the default
-        // `.automatic` mirrors to CloudKit on a signed/entitled test host and
-        // fails the load with `loadIssueModelContainer`.
-        let localConfig = ModelConfiguration(
-            "local",
-            schema: Schema([
-                Playlist.self, Lume.Category.self, LiveStream.self, Movie.self,
-                Series.self, Episode.self, CastMember.self, EPGListing.self, EPGSource.self
-            ]),
-            isStoredInMemoryOnly: true,
-            cloudKitDatabase: .none
-        )
-        let cloudConfig = ModelConfiguration(
-            "cloud",
-            schema: Schema([SyncedPlaylist.self, UserContentState.self, SyncedEPGSource.self]),
-            isStoredInMemoryOnly: true,
-            cloudKitDatabase: .none
-        )
-        return try ModelContainer(for: fullSchema, configurations: localConfig, cloudConfig)
-    }
-
     private func freshShadow() -> CloudSyncShadow {
         let suite = UserDefaults(suiteName: "cloudsync.test.\(UUID().uuidString)")!
         return CloudSyncShadow(defaults: suite)
     }
 
     @Test func `local playlist and favorite export to cloud mirrors`() async throws {
-        let container = try makeContainer()
+        let container = try makeProfileTestContainer()
         let ctx = container.mainContext
 
         let playlist = Playlist(name: "My IPTV", serverURL: "http://x", username: "u", password: "p")
@@ -247,7 +219,7 @@ struct CloudSyncEngineTests {
     }
 
     @Test func `cloud playlist creates a local playlist`() async throws {
-        let container = try makeContainer()
+        let container = try makeProfileTestContainer()
         let ctx = container.mainContext
         let pid = UUID()
         ctx.insert(SyncedPlaylist(
@@ -267,8 +239,71 @@ struct CloudSyncEngineTests {
         #expect(locals.first?.lastSyncDate == nil) // so auto-sync fetches its catalog
     }
 
+    @Test func `cloud webdav playlist creates a local webdav playlist`() async throws {
+        let container = try makeProfileTestContainer()
+        let ctx = container.mainContext
+        let pid = UUID()
+        ctx.insert(SyncedPlaylist(
+            id: pid, name: "NAS", serverURL: "http://nas.local/Movies/", username: "nu", password: "np",
+            sourceTypeRaw: PlaylistSourceType.webdav.rawValue, epgURL: nil, syncEnabled: true
+        ))
+        try ctx.save()
+
+        let engine = CloudSyncEngine(container: container, shadow: freshShadow())
+        let result = await engine.reconcile()
+
+        #expect(result.playlistsCreatedLocally == 1)
+        let local = try #require(try ctx.fetch(FetchDescriptor<Playlist>()).first)
+        // The credentials have to survive the pull: a share that arrives
+        // without them 401s on every PROPFIND and every playback open.
+        #expect(local.sourceType == .webdav)
+        #expect(local.serverURL == "http://nas.local/Movies/")
+        #expect(local.username == "nu")
+        #expect(local.password == "np")
+    }
+
+    /// A newer build can mirror a source type this one has never heard of.
+    /// `Playlist.sourceType` resolves an unknown raw value through `?? .xtream`,
+    /// so adopting the record would aim the Xtream pipeline at the user's own
+    /// server with their credentials — and then push that wrong raw value back
+    /// to CloudKit for every sibling device.
+    @Test func `cloud playlist with an unknown source type is skipped, not adopted as xtream`() async throws {
+        let container = try makeProfileTestContainer()
+        let ctx = container.mainContext
+        let shadow = freshShadow()
+
+        // A known-good local playlist keeps the catalog non-empty, so the
+        // integrity gate can't be what suppresses the pull.
+        let existing = Playlist(name: "Mine", serverURL: "http://x", username: "u", password: "p")
+        ctx.insert(existing)
+
+        let pid = UUID()
+        ctx.insert(SyncedPlaylist(
+            id: pid, name: "From The Future", serverURL: "http://nas.local/Share/", username: "fu", password: "fp",
+            sourceTypeRaw: "quantumdav", epgURL: nil, syncEnabled: true
+        ))
+        try ctx.save()
+
+        let engine = CloudSyncEngine(container: container, shadow: shadow)
+        let result = await engine.reconcile()
+
+        #expect(result.playlistsCreatedLocally == 0)
+        let locals = try ctx.fetch(FetchDescriptor<Playlist>())
+        #expect(locals.count == 1)
+        #expect(locals.first?.id == existing.id)
+        #expect(!locals.contains { $0.id == pid })
+
+        // The shadow stays untouched, so the record is still "new" to a later
+        // build that does understand the type — skipping must not baseline it.
+        #expect(shadow.playlistShadow(pid.uuidString) == nil)
+
+        // And the mirror is left exactly as it was: no rewrite to `xtream`.
+        let mirror = try #require(try ctx.fetch(FetchDescriptor<SyncedPlaylist>()).first { $0.id == pid })
+        #expect(mirror.sourceTypeRaw == "quantumdav")
+    }
+
     @Test func `cloud content state stays pending until its catalog item exists`() async throws {
-        let container = try makeContainer()
+        let container = try makeProfileTestContainer()
         let ctx = container.mainContext
         let shadow = freshShadow()
         let pid = UUID()
@@ -301,7 +336,7 @@ struct CloudSyncEngineTests {
     }
 
     @Test func `empty local catalog with a populated shadow never deletes cloud mirrors`() async throws {
-        let container = try makeContainer()
+        let container = try makeProfileTestContainer()
         let ctx = container.mainContext
         let shadow = freshShadow()
 
@@ -343,7 +378,7 @@ struct CloudSyncEngineTests {
     @Test func `empty local catalog with an empty shadow still pulls from the cloud`() async throws {
         // A genuinely fresh device (or a clean reinstall) has an empty shadow, so
         // the integrity gate must NOT block it — it has to pull cloud playlists in.
-        let container = try makeContainer()
+        let container = try makeProfileTestContainer()
         let ctx = container.mainContext
         let pid = UUID()
         ctx.insert(SyncedPlaylist(
@@ -360,7 +395,7 @@ struct CloudSyncEngineTests {
     }
 
     @Test func `state whose playlist is gone is garbage-collected`() async throws {
-        let container = try makeContainer()
+        let container = try makeProfileTestContainer()
         let ctx = container.mainContext
         let pid = UUID() // no playlist (local or cloud) for this id
         ctx.insert(UserContentState(contentId: "\(pid.uuidString)-movie-1", kind: .movie, isFavorite: true))
@@ -375,7 +410,7 @@ struct CloudSyncEngineTests {
     // MARK: - Content Management (hidden categories / channels, category order)
 
     @Test func `a hidden category exports to a cloud mirror`() async throws {
-        let container = try makeContainer()
+        let container = try makeProfileTestContainer()
         let ctx = container.mainContext
 
         let playlist = Playlist(name: "My IPTV", serverURL: "http://x", username: "u", password: "p")
@@ -399,7 +434,7 @@ struct CloudSyncEngineTests {
     }
 
     @Test func `a cloud category state hides the matching local category`() async throws {
-        let container = try makeContainer()
+        let container = try makeProfileTestContainer()
         let ctx = container.mainContext
 
         // The catalog already has the playlist + a visible category (as a fresh
@@ -423,7 +458,7 @@ struct CloudSyncEngineTests {
     }
 
     @Test func `a hidden channel syncs but its per-category order does not`() async throws {
-        let container = try makeContainer()
+        let container = try makeProfileTestContainer()
         let ctx = container.mainContext
 
         let playlist = Playlist(name: "My IPTV", serverURL: "http://x", username: "u", password: "p")
@@ -455,7 +490,7 @@ struct CloudSyncEngineTests {
     // MARK: - EPG sources
 
     @Test func `manual EPG source exports to a cloud mirror`() async throws {
-        let container = try makeContainer()
+        let container = try makeProfileTestContainer()
         let ctx = container.mainContext
         let source = EPGSource(name: "Custom", url: "http://x/guide.xml")
         let sid = source.id
@@ -473,7 +508,7 @@ struct CloudSyncEngineTests {
     }
 
     @Test func `cloud EPG source creates a local manual source`() async throws {
-        let container = try makeContainer()
+        let container = try makeProfileTestContainer()
         let ctx = container.mainContext
         let sid = UUID()
         ctx.insert(SyncedEPGSource(id: sid, name: "Remote Guide", url: "http://r/epg.xml", isEnabled: true))
@@ -491,7 +526,7 @@ struct CloudSyncEngineTests {
     }
 
     @Test func `a pulled playlist regenerates its linked EPG source locally`() async throws {
-        let container = try makeContainer()
+        let container = try makeProfileTestContainer()
         let ctx = container.mainContext
         let pid = UUID()
         ctx.insert(SyncedPlaylist(
